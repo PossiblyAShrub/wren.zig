@@ -9,14 +9,18 @@ fn wrenErrorFn(errorType: wren.ErrorType, module: ?[]const u8, line: i32, messag
     var errorTypeStr: []const u8 = "COMPILE ERROR";
     switch (errorType) {
         .Compile => {},
-        .Runtime => { errorTypeStr = "RUNTIME ERROR"; },
-        .StackTrace => { errorTypeStr = "STACK TRACE"; },
+        .Runtime => {
+            errorTypeStr = "RUNTIME ERROR";
+        },
+        .StackTrace => {
+            errorTypeStr = "STACK TRACE";
+        },
     }
 
     if (module != null) {
-        std.debug.print("{s}:{} [{s}] {s}\n", .{module.?, line, errorTypeStr, message});
+        std.debug.print("{s}:{} [{s}] {s}\n", .{ module.?, line, errorTypeStr, message });
     } else {
-        std.debug.print("[{s}] {s}\n", .{errorTypeStr, message});
+        std.debug.print("[{s}] {s}\n", .{ errorTypeStr, message });
     }
 }
 
@@ -58,7 +62,13 @@ const Point = struct {
     }
 };
 
-const WrenApi = wren.wrenApi(.{
+fn say_hi(name: []const u8) ![]u8 {
+    const gpa = std.heap.smp_allocator;
+    const str = try std.fmt.allocPrint(gpa, "Hi {s}!", .{name});
+    return str;
+}
+
+const DemoModule = wren.module(.{
     .module = "demo.wren",
     .classes = .{
         wren.Class(.{
@@ -84,19 +94,30 @@ const WrenApi = wren.wrenApi(.{
     },
 });
 
+const OtherModule = wren.module(.{
+    .module = "Other.wren",
+    .classes = .{
+        wren.Class(.{
+            .name = "Greeter",
+            .methods = .{
+                wren.Static("hello", say_hi),
+            },
+        }),
+    },
+});
+
 pub fn main() !void {
     const gpa = std.heap.smp_allocator;
     var vm = try wren.Vm.init(gpa, .{
         .writeFn = wrenWriteFn,
         .errorFn = wrenErrorFn,
-        .bindForeignMethodFn = WrenApi.bindForeignMethod,
-        .bindForeignClassFn = WrenApi.bindForeignClass,
+        .modules = .{DemoModule, OtherModule},
     });
     defer vm.deinit(gpa);
 
-    try vm.interpret("demo.wren", WrenApi.source);
     try vm.interpret("main.wren",
         \\import "demo.wren" for Test, Point
+        \\import "other.wren" for Greeter
         \\
         \\System.print(Test.add1(41)) // 42
         \\
@@ -111,5 +132,7 @@ pub fn main() !void {
         \\
         \\p.translate(1, 1)
         \\System.print("Updated! %(p.x) %(p.y)") // 1, 3
-        );
+        \\
+        \\System.print(Greeter.hello("Alice"))
+    );
 }

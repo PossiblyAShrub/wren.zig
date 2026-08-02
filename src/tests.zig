@@ -70,7 +70,7 @@ fn expectedFailure() error{ExpectedFailure}!void {
     return error.ExpectedFailure;
 }
 
-const Bindings = wren.wrenApi(.{
+const Bindings = wren.module(.{
     .module = "bindings.wren",
     .classes = .{
         wren.Class(.{
@@ -100,7 +100,7 @@ const Bindings = wren.wrenApi(.{
     },
 });
 
-const MoreBindings = wren.wrenApi(.{
+const MoreBindings = wren.module(.{
     .module = "more-bindings.wren",
     .classes = .{
         wren.ForeignClass(Meter, .{
@@ -111,8 +111,6 @@ const MoreBindings = wren.wrenApi(.{
         }),
     },
 });
-
-const MergedBindings = wren.mergeApis(.{ Bindings, MoreBindings });
 
 fn captureError(kind: wren.ErrorType, _: ?[]const u8, _: i32, message: []const u8) void {
     if (kind == .Runtime and std.mem.eql(u8, message, "ExpectedFailure")) {
@@ -126,8 +124,7 @@ fn captureError(kind: wren.ErrorType, _: ?[]const u8, _: i32, message: []const u
 fn bindingVm() !wren.Vm {
     return wren.Vm.init(std.testing.allocator, .{
         .errorFn = captureError,
-        .bindForeignMethodFn = MergedBindings.bindForeignMethod,
-        .bindForeignClassFn = MergedBindings.bindForeignClass,
+        .modules = .{ Bindings, MoreBindings },
     });
 }
 
@@ -182,16 +179,10 @@ test "generated binding source" {
     , Bindings.source);
 }
 
-test "multiple generated APIs share one VM" {
-    try std.testing.expectEqual(Bindings.source.ptr, MergedBindings.sourceFor(Bindings.module).?.ptr);
-    try std.testing.expectEqual(MoreBindings.source.ptr, MergedBindings.sourceFor(MoreBindings.module).?.ptr);
-    try std.testing.expect(MergedBindings.sourceFor("missing.wren") == null);
-
+test "Vm.init preloads multiple generated modules" {
     var vm = try bindingVm();
     defer vm.deinit(std.testing.allocator);
 
-    try vm.interpret(Bindings.module, Bindings.source);
-    try vm.interpret(MoreBindings.module, MoreBindings.source);
     try vm.interpret("merged.wren",
         \\import "bindings.wren" for Bridge
         \\import "more-bindings.wren" for Meter
@@ -204,7 +195,6 @@ test "strings, nulls, lists, maps, and foreign arguments" {
     var vm = try bindingVm();
     defer vm.deinit(std.testing.allocator);
 
-    try vm.interpret("bindings.wren", Bindings.source);
     try vm.interpret("values.wren",
         \\import "bindings.wren" for Bridge, Point
         \\if (Bridge.echo("alpha") != "alpha") Fiber.abort("bad string")
@@ -222,7 +212,6 @@ test "Zig errors abort the Wren fiber" {
     var vm = try bindingVm();
     defer vm.deinit(std.testing.allocator);
 
-    try vm.interpret("bindings.wren", Bindings.source);
     try std.testing.expectError(error.RuntimeError, vm.interpret("error.wren",
         \\import "bindings.wren" for Bridge
         \\Bridge.fail()
@@ -235,7 +224,6 @@ test "collection errors preserve their Wren message" {
     var vm = try bindingVm();
     defer vm.deinit(std.testing.allocator);
 
-    try vm.interpret("bindings.wren", Bindings.source);
     try std.testing.expectError(error.RuntimeError, vm.interpret("bounds.wren",
         \\import "bindings.wren" for Bridge
         \\Bridge.inspectList([])
@@ -247,7 +235,6 @@ test "foreign arguments are type checked" {
     var vm = try bindingVm();
     defer vm.deinit(std.testing.allocator);
 
-    try vm.interpret("bindings.wren", Bindings.source);
     try std.testing.expectError(error.RuntimeError, vm.interpret("wrong-foreign.wren",
         \\import "bindings.wren" for Bridge, Other
         \\Bridge.pointX(Other.new())
@@ -259,7 +246,6 @@ test "foreign finalizer runs once" {
     var vm = try bindingVm();
     defer vm.deinit(std.testing.allocator);
 
-    try vm.interpret("bindings.wren", Bindings.source);
     try vm.interpret("finalizer.wren",
         \\import "bindings.wren" for Point
         \\class Scope {

@@ -16,10 +16,8 @@ pub const Constructor = bindings.Constructor;
 pub const Class = bindings.Class;
 /// Declares a Wren foreign class whose instances contain a Zig value.
 pub const ForeignClass = bindings.ForeignClass;
-/// Generates source and binding callbacks for one Wren foreign module.
-pub const wrenApi = bindings.wrenApi;
-/// Combines generated APIs for distinct modules into one binding callback pair.
-pub const mergeApis = bindings.mergeApis;
+/// Generates a foreign module that can be passed to `Vm.init`.
+pub const module = bindings.module;
 /// A borrowed, typed view of a Wren list passed to a foreign method.
 pub const List = bindings.List;
 /// A borrowed, typed view of a Wren map passed to a foreign method.
@@ -46,7 +44,7 @@ fn writeCallback(vm: ?*raw.WrenVM, text: [*c]const u8) callconv(.c) void {
 fn errorCallback(
     vm: ?*raw.WrenVM,
     kind: raw.WrenErrorType,
-    module: [*c]const u8,
+    module_ptr: [*c]const u8,
     line: c_int,
     message: [*c]const u8,
 ) callconv(.c) void {
@@ -60,7 +58,7 @@ fn errorCallback(
     };
     callback(
         error_type,
-        if (module == null) null else std.mem.span(module),
+        if (module_ptr == null) null else std.mem.span(module_ptr),
         @intCast(line),
         std.mem.span(message),
     );
@@ -73,45 +71,72 @@ pub const Vm = struct {
     /// Receives compile errors, runtime errors, and stack-trace frames.
     pub const ErrorFn = fn (error_type: ErrorType, module: ?[]const u8, line: i32, message: []const u8) void;
 
-    /// Controls host callbacks installed when creating a VM.
-    pub const Config = struct {
+    const RuntimeConfig = struct {
         /// Optional output callback.
         writeFn: ?*const WriteFn = null,
         /// Optional error-reporting callback.
         errorFn: ?*const ErrorFn = null,
-        /// Optional method resolver, usually from `wrenApi` or `mergeApis`.
-        bindForeignMethodFn: raw.WrenBindForeignMethodFn = null,
-        /// Optional class resolver, usually from `wrenApi` or `mergeApis`.
-        bindForeignClassFn: raw.WrenBindForeignClassFn = null,
     };
 
     /// Errors returned after Wren reports compilation or runtime failure.
     pub const InterpretError = error{ CompileError, RuntimeError };
 
     const VmData = struct {
-        config: Config,
+        config: RuntimeConfig,
         raw_vm: ?*raw.WrenVM = null,
     };
 
     data: *VmData,
 
-    /// Creates a VM whose auxiliary Zig state is allocated with `gpa`.
-    pub fn init(gpa: std.mem.Allocator, config: Config) !Vm {
+    /// Creates and configures a Wren VM.
+    ///
+    /// `options` may contain `writeFn`, `errorFn`, and a heterogeneous tuple of
+    /// generated `modules`. The modules are bound and interpreted in tuple order
+    /// before this function returns, so application code may import them
+    /// immediately.
+    pub fn init(gpa: std.mem.Allocator, comptime options: anytype) !Vm {
+        const Options = @TypeOf(options);
+        inline for (std.meta.fields(Options)) |field| {
+            if (comptime !std.mem.eql(u8, field.name, "writeFn") and
+                !std.mem.eql(u8, field.name, "errorFn") and
+                !std.mem.eql(u8, field.name, "modules"))
+            {
+                @compileError("unknown Vm.init option: " ++ field.name);
+            }
+        }
+        const runtime_config: RuntimeConfig = .{
+            .writeFn = if (@hasField(Options, "writeFn")) options.writeFn else null,
+            .errorFn = if (@hasField(Options, "errorFn")) options.errorFn else null,
+        };
+
         const data = try gpa.create(VmData);
-        errdefer gpa.destroy(data);
-        data.* = .{ .config = config };
+        data.* = .{ .config = runtime_config };
+        var vm_created = false;
+        errdefer if (!vm_created) gpa.destroy(data);
 
         var raw_config: raw.WrenConfiguration = undefined;
         raw.wrenInitConfiguration(&raw_config);
         raw_config.writeFn = writeCallback;
         raw_config.errorFn = errorCallback;
-        raw_config.bindForeignMethodFn = config.bindForeignMethodFn;
-        raw_config.bindForeignClassFn = config.bindForeignClassFn;
+        if (@hasField(Options, "modules")) {
+            const Merged = bindings.mergeModules(options.modules);
+            raw_config.bindForeignMethodFn = Merged.bindForeignMethod;
+            raw_config.bindForeignClassFn = Merged.bindForeignClass;
+        }
         raw_config.userData = data;
 
         data.raw_vm = raw.wrenNewVM(&raw_config);
         if (data.raw_vm == null) return error.OutOfMemory;
-        return .{ .data = data };
+        vm_created = true;
+
+        var vm: Vm = .{ .data = data };
+        errdefer vm.deinit(gpa);
+        if (@hasField(Options, "modules")) {
+            inline for (options.modules) |Module| {
+                try vm.interpret(Module.module, Module.source);
+            }
+        }
+        return vm;
     }
 
     /// Frees the Wren VM and its auxiliary state using the allocator from `init`.
@@ -121,9 +146,9 @@ pub const Vm = struct {
         self.* = undefined;
     }
 
-    /// Compiles and executes sentinel-terminated Wren source as `module`.
-    pub fn interpret(self: *Vm, module: [*c]const u8, source: [*c]const u8) InterpretError!void {
-        return switch (raw.wrenInterpret(self.data.raw_vm, module, source)) {
+    /// Compiles and executes sentinel-terminated Wren source as `module_name`.
+    pub fn interpret(self: *Vm, module_name: [*c]const u8, source: [*c]const u8) InterpretError!void {
+        return switch (raw.wrenInterpret(self.data.raw_vm, module_name, source)) {
             raw.WREN_RESULT_SUCCESS => {},
             raw.WREN_RESULT_COMPILE_ERROR => error.CompileError,
             raw.WREN_RESULT_RUNTIME_ERROR => error.RuntimeError,

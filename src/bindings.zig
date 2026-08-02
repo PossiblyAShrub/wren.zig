@@ -86,9 +86,9 @@ pub fn ForeignClass(comptime T: type, comptime options: anytype) struct {
 /// Generates one Wren foreign module from a declarative class configuration.
 ///
 /// The returned type exposes `module`, generated `source`, and the two binding
-/// callbacks accepted by `Vm.Config`. Use `mergeApis` when a VM hosts more than
-/// one generated foreign module.
-pub fn wrenApi(comptime config: anytype) type {
+/// callbacks used internally by `Vm`. Pass the returned type in `Vm.init`'s
+/// `.modules` tuple to install it.
+pub fn module(comptime config: anytype) type {
     validateApi(config);
 
     return struct {
@@ -149,36 +149,25 @@ pub fn wrenApi(comptime config: anytype) type {
     };
 }
 
-/// Combines generated APIs for distinct Wren modules into one callback pair.
+/// Combines generated modules into the callback pair required by Wren's C API.
 ///
-/// Existing APIs keep their own `module` and `source`; interpret each source
-/// once before importing it. The returned type exposes `apis`, `sourceFor`,
-/// `bindForeignMethod`, and `bindForeignClass`. Duplicate module names are a
-/// compile error.
-///
-/// ```zig
-/// const AllApis = wren.mergeApis(.{ MathApi, GameApi });
-/// var vm = try wren.Vm.init(allocator, .{
-///     .bindForeignMethodFn = AllApis.bindForeignMethod,
-///     .bindForeignClassFn = AllApis.bindForeignClass,
-/// });
-/// ```
-pub fn mergeApis(comptime apis_value: anytype) type {
-    validateMergedApis(apis_value);
+/// This is public for the VM implementation; applications should normally pass
+/// the tuple directly as `.modules` to `Vm.init`. Duplicate names are rejected.
+pub fn mergeModules(comptime modules_value: anytype) type {
+    validateMergedModules(modules_value);
 
     return struct {
-        /// The tuple of generated API types supplied to `mergeApis`.
-        pub const apis = apis_value;
+        pub const modules = modules_value;
 
-        /// Finds generated declarations by resolved Wren module name.
+        /// Finds generated declarations by resolved module name.
         pub fn sourceFor(module_name: []const u8) ?[:0]const u8 {
-            inline for (apis_value) |Api| {
-                if (std.mem.eql(u8, module_name, Api.module)) return Api.source;
+            inline for (modules_value) |Module| {
+                if (std.mem.eql(u8, module_name, Module.module)) return Module.source;
             }
             return null;
         }
 
-        /// Dispatches Wren's method-binding callback to the matching module API.
+        /// Dispatches Wren's method-binding callback to the matching module.
         pub fn bindForeignMethod(
             vm: ?*raw.WrenVM,
             module_ptr: [*c]const u8,
@@ -186,22 +175,22 @@ pub fn mergeApis(comptime apis_value: anytype) type {
             is_static: bool,
             signature_ptr: [*c]const u8,
         ) callconv(.c) raw.WrenForeignMethodFn {
-            inline for (apis_value) |Api| {
-                if (Api.bindForeignMethod(vm, module_ptr, class_ptr, is_static, signature_ptr)) |callback| {
+            inline for (modules_value) |Module| {
+                if (Module.bindForeignMethod(vm, module_ptr, class_ptr, is_static, signature_ptr)) |callback| {
                     return callback;
                 }
             }
             return null;
         }
 
-        /// Dispatches Wren's foreign-class callback to the matching module API.
+        /// Dispatches Wren's foreign-class callback to the matching module.
         pub fn bindForeignClass(
             vm: ?*raw.WrenVM,
             module_ptr: [*c]const u8,
             class_ptr: [*c]const u8,
         ) callconv(.c) raw.WrenForeignClassMethods {
-            inline for (apis_value) |Api| {
-                const methods = Api.bindForeignClass(vm, module_ptr, class_ptr);
+            inline for (modules_value) |Module| {
+                const methods = Module.bindForeignClass(vm, module_ptr, class_ptr);
                 if (methods.allocate != null) return methods;
             }
             return .{ .allocate = null, .finalize = null };
@@ -209,11 +198,11 @@ pub fn mergeApis(comptime apis_value: anytype) type {
     };
 }
 
-fn validateMergedApis(comptime apis: anytype) void {
-    inline for (apis, 0..) |Api, index| {
-        inline for (apis, 0..) |Other, other_index| {
-            if (other_index > index and std.mem.eql(u8, Api.module, Other.module)) {
-                @compileError("duplicate Wren module: " ++ Api.module);
+fn validateMergedModules(comptime modules: anytype) void {
+    inline for (modules, 0..) |Module, index| {
+        inline for (modules, 0..) |Other, other_index| {
+            if (other_index > index and std.mem.eql(u8, Module.module, Other.module)) {
+                @compileError("duplicate Wren module: " ++ Module.module);
             }
         }
     }
