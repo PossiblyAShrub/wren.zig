@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Run demo
+        run: zig build demo
