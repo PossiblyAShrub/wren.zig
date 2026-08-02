@@ -4,8 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const dep_wren = b.dependency("wren-c", .{});
+
     const translate = b.addTranslateC(.{
-        .root_source_file = b.path("wren/src/include/wren.h"),
+        .root_source_file = dep_wren.path("src/include/wren.h"),
         .target = target,
         .optimize = optimize,
     });
@@ -16,22 +18,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    mod_wren_raw.addCSourceFiles(.{
-        .files = &.{
-            "wren/src/vm/wren_compiler.c",
-            "wren/src/vm/wren_core.c",
-            "wren/src/vm/wren_debug.c",
-            "wren/src/vm/wren_primitive.c",
-            "wren/src/vm/wren_utils.c",
-            "wren/src/vm/wren_value.c",
-            "wren/src/vm/wren_vm.c",
-            "wren/src/optional/wren_opt_meta.c",
-            "wren/src/optional/wren_opt_random.c",
-        },
-    });
-    mod_wren_raw.addIncludePath(b.path("wren/src/include/"));
-    mod_wren_raw.addIncludePath(b.path("wren/src/vm"));
-    mod_wren_raw.addIncludePath(b.path("wren/src/optional/"));
+    mod_wren_raw.addCSourceFile(.{ .file = dep_wren.path("src/vm/wren_compiler.c") });
+    mod_wren_raw.addCSourceFile(.{ .file = dep_wren.path("src/vm/wren_core.c") });
+    mod_wren_raw.addCSourceFile(.{ .file = dep_wren.path("src/vm/wren_debug.c") });
+    mod_wren_raw.addCSourceFile(.{ .file = dep_wren.path("src/vm/wren_primitive.c") });
+    mod_wren_raw.addCSourceFile(.{ .file = dep_wren.path("src/vm/wren_utils.c") });
+    mod_wren_raw.addCSourceFile(.{ .file = dep_wren.path("src/vm/wren_value.c") });
+    mod_wren_raw.addCSourceFile(.{ .file = dep_wren.path("src/vm/wren_vm.c") });
+    mod_wren_raw.addCSourceFile(.{ .file = dep_wren.path("src/optional/wren_opt_meta.c") });
+    mod_wren_raw.addCSourceFile(.{ .file = dep_wren.path("src/optional/wren_opt_random.c") });
+    mod_wren_raw.addIncludePath(dep_wren.path("src/include/"));
+    mod_wren_raw.addIncludePath(dep_wren.path("src/vm"));
+    mod_wren_raw.addIncludePath(dep_wren.path("src/optional/"));
 
     const mod_wren = b.addModule("wren", .{
         .root_source_file = b.path("src/root.zig"),
