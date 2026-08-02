@@ -10,13 +10,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const mod = b.addModule("wren", .{
+    const mod_wren_raw = b.addModule("wren_raw", .{
         .root_source_file = translate.getOutput(),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    mod.addCSourceFiles(.{
+    mod_wren_raw.addCSourceFiles(.{
         .files = &.{
             "wren/src/vm/wren_compiler.c",
             "wren/src/vm/wren_core.c",
@@ -29,9 +29,18 @@ pub fn build(b: *std.Build) void {
             "wren/src/optional/wren_opt_random.c",
         },
     });
-    mod.addIncludePath(b.path("wren/src/include/"));
-    mod.addIncludePath(b.path("wren/src/vm"));
-    mod.addIncludePath(b.path("wren/src/optional/"));
+    mod_wren_raw.addIncludePath(b.path("wren/src/include/"));
+    mod_wren_raw.addIncludePath(b.path("wren/src/vm"));
+    mod_wren_raw.addIncludePath(b.path("wren/src/optional/"));
+
+    const mod_wren = b.addModule("wren", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "wren_raw", .module = mod_wren_raw },
+        },
+    });
 
     const mod_tests = b.addTest(.{
         .root_module = b.addModule("wren_test", .{
@@ -39,7 +48,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "wren", .module = mod },
+                .{ .name = "wren", .module = mod_wren },
             },
             }),
     });
@@ -55,7 +64,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "wren", .module = mod },
+                .{ .name = "wren", .module = mod_wren },
             },
         }),
     });

@@ -2,31 +2,28 @@ const std = @import("std");
 const wren = @import("wren");
 
 test "No side effects" {
-    var config: wren.WrenConfiguration = .{};
-    wren.wrenInitConfiguration(&config);
-    const vm = wren.wrenNewVM(&config);
-    defer wren.wrenFreeVM(vm);
+    const gpa = std.testing.allocator;
+    var vm = try wren.Vm.init(gpa, .{});
+    defer vm.deinit(gpa);
 
-    const result = wren.wrenInterpret(vm, "main.wren", "var x = 42");
-    try std.testing.expectEqual(wren.WREN_RESULT_SUCCESS, @as(c_int, @intCast(result)));
+    try vm.interpret("main.wren", "var x = 42");
 }
 
 test "Compile error" {
-    var config: wren.WrenConfiguration = .{};
-    wren.wrenInitConfiguration(&config);
-    const vm = wren.wrenNewVM(&config);
-    defer wren.wrenFreeVM(vm);
+    const gpa = std.testing.allocator;
+    var vm = try wren.Vm.init(gpa, .{});
+    defer vm.deinit(gpa);
 
-    const result = wren.wrenInterpret(vm, "main.wren", "var x = 42;"); // bad semi!
-    try std.testing.expectEqual(wren.WREN_RESULT_COMPILE_ERROR, @as(c_int, @intCast(result)));
+    const err = vm.interpret("main.wren", "var x = 42;");
+    try std.testing.expectError(error.CompileError, err);
 }
 
 test "Runtime error" {
-    var config: wren.WrenConfiguration = .{};
-    wren.wrenInitConfiguration(&config);
-    const vm = wren.wrenNewVM(&config);
-    defer wren.wrenFreeVM(vm);
+    const gpa = std.testing.allocator;
+    var vm = try wren.Vm.init(gpa, .{});
+    defer vm.deinit(gpa);
 
-    const result = wren.wrenInterpret(vm, "main.wren", "System.unknown()"); // unknown method
-    try std.testing.expectEqual(wren.WREN_RESULT_RUNTIME_ERROR, @as(c_int, @intCast(result)));
+
+    const err = vm.interpret("main.wren", "System.unknown()");
+    try std.testing.expectError(error.RuntimeError, err);
 }
