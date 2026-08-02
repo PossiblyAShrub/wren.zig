@@ -4,6 +4,12 @@ Zig bindings for [wren](https://wren.io).
 
 ## Usage
 
+Add to your project with:
+
+```sh
+zig fetch --save=wren git+https://github.com/PossiblyAShrub/wren.zig.git
+```
+
 wren.zig exposes a zig-ified wren API. Bindings can be automatically generated
 from functions.
 
