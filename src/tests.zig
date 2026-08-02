@@ -119,7 +119,7 @@ const MoreBindings = wren.module(.{
     },
 });
 
-fn captureError(kind: wren.ErrorType, _: ?[]const u8, _: i32, message: []const u8) void {
+fn captureError(_: ?*void, kind: wren.ErrorType, _: ?[]const u8, _: i32, message: []const u8) void {
     if (kind == .Runtime and std.mem.eql(u8, message, "ExpectedFailure")) {
         expected_error_seen = true;
     }
@@ -128,8 +128,8 @@ fn captureError(kind: wren.ErrorType, _: ?[]const u8, _: i32, message: []const u
     }
 }
 
-fn bindingVm() !wren.Vm {
-    return wren.Vm.init(std.testing.allocator, .{
+fn bindingVm() !wren.Vm(void) {
+    return wren.Vm(void).init(std.testing.allocator, null, .{
         .errorFn = captureError,
         .modules = .{ Bindings, MoreBindings },
     });
@@ -137,7 +137,7 @@ fn bindingVm() !wren.Vm {
 
 test "No side effects" {
     const gpa = std.testing.allocator;
-    var vm = try wren.Vm.init(gpa, .{});
+    var vm = try wren.Vm(void).init(gpa, null, .{});
     defer vm.deinit(gpa);
 
     try vm.interpret("main.wren", "var x = 42");
@@ -145,7 +145,7 @@ test "No side effects" {
 
 test "Compile error" {
     const gpa = std.testing.allocator;
-    var vm = try wren.Vm.init(gpa, .{});
+    var vm = try wren.Vm(void).init(gpa, null, .{});
     defer vm.deinit(gpa);
 
     const err = vm.interpret("main.wren", "var x = 42;");
@@ -154,7 +154,7 @@ test "Compile error" {
 
 test "Runtime error" {
     const gpa = std.testing.allocator;
-    var vm = try wren.Vm.init(gpa, .{});
+    var vm = try wren.Vm(void).init(gpa, null, .{});
     defer vm.deinit(gpa);
 
     const err = vm.interpret("main.wren", "System.unknown()");

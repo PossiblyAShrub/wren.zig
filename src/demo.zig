@@ -1,11 +1,11 @@
 const std = @import("std");
 const wren = @import("wren");
 
-fn wrenWriteFn(text: []const u8) void {
+fn wrenWriteFn(_: ?*void, text: []const u8) void {
     std.debug.print("{s}", .{text});
 }
 
-fn wrenErrorFn(errorType: wren.ErrorType, module: ?[]const u8, line: i32, message: []const u8) void {
+fn wrenErrorFn(_: ?*void, errorType: wren.ErrorType, module: ?[]const u8, line: i32, message: []const u8) void {
     var errorTypeStr: []const u8 = "COMPILE ERROR";
     switch (errorType) {
         .Compile => {},
@@ -108,7 +108,7 @@ const OtherModule = wren.module(.{
 
 pub fn main() !void {
     const gpa = std.heap.smp_allocator;
-    var vm = try wren.Vm.init(gpa, .{
+    var vm: wren.Vm(void) = try .init(gpa, null, .{
         .writeFn = wrenWriteFn,
         .errorFn = wrenErrorFn,
         .modules = .{ DemoModule, OtherModule },

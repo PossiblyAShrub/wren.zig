@@ -18,7 +18,7 @@ const std = @import("std");
 const wren = @import("wren");
 const gpa = std.heap.smp_allocator;
 
-fn writeFn(text: []const u8) void {
+fn writeFn(_: *void, text: []const u8) void {
     std.debug.print("{s}", .{text});
 }
 
@@ -40,7 +40,7 @@ const DemoModule = wren.module(.{
 });
 
 pub fn main() !void {
-    var vm = try wren.Vm.init(gpa, .{
+    var vm: wren.Vm(void) = try .init(gpa, null, .{
         .writeFn = writeFn,
         .modules = .{ DemoModule },
     });
