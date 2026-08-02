@@ -20,19 +20,96 @@ fn wrenErrorFn(errorType: wren.ErrorType, module: ?[]const u8, line: i32, messag
     }
 }
 
+fn demo_add(x: f64) f64 {
+    return x + 1;
+}
+
+const Point = struct {
+    x: f64,
+    y: f64,
+
+    pub fn init(x: f64, y: f64) Point {
+        return .{ .x = x, .y = y };
+    }
+
+    pub fn translate(self: *Point, dx: f64, dy: f64) void {
+        self.x += dx;
+        self.y += dy;
+    }
+
+    pub fn length(self: *const Point) f64 {
+        return @sqrt(self.x * self.x + self.y * self.y);
+    }
+
+    pub fn getX(self: *const Point) f64 {
+        return self.x;
+    }
+
+    pub fn setX(self: *Point, value: f64) void {
+        self.x = value;
+    }
+
+    pub fn getY(self: *const Point) f64 {
+        return self.y;
+    }
+
+    pub fn setY(self: *Point, value: f64) void {
+        self.y = value;
+    }
+};
+
+const WrenApi = wren.wrenApi(.{
+    .module = "demo.wren",
+    .classes = .{
+        wren.Class(.{
+            .name = "Test",
+            .methods = .{
+                wren.Static("add1", demo_add),
+            },
+        }),
+
+        wren.ForeignClass(Point, .{
+            .name = "Point",
+            .constructor = wren.Constructor("new", Point.init),
+            .methods = .{
+                wren.Method("translate", Point.translate),
+                wren.Getter("length", Point.length),
+                wren.Getter("x", Point.getX),
+                wren.Setter("x", Point.setX),
+                wren.Getter("y", Point.getY),
+                wren.Setter("y", Point.setY),
+            },
+            .finalizer = null,
+        }),
+    },
+});
+
 pub fn main() !void {
     const gpa = std.heap.smp_allocator;
     var vm = try wren.Vm.init(gpa, .{
         .writeFn = wrenWriteFn,
         .errorFn = wrenErrorFn,
+        .bindForeignMethodFn = WrenApi.bindForeignMethod,
+        .bindForeignClassFn = WrenApi.bindForeignClass,
     });
     defer vm.deinit(gpa);
 
+    try vm.interpret("demo.wren", WrenApi.source);
     try vm.interpret("main.wren",
-        \\class Test {
-        \\  foreign static add1(x)
-        \\}
+        \\import "demo.wren" for Test, Point
         \\
-        \\System.print(Test.add1(41))
+        \\System.print(Test.add1(41)) // 42
+        \\
+        \\var p = Point.new(6, 7)
+        \\System.print(p.length) // 9.219
+        \\
+        \\p.x = 0
+        \\System.print(p.length) // 7
+        \\
+        \\p.y = 2
+        \\System.print(p.length) // 2
+        \\
+        \\p.translate(1, 1)
+        \\System.print("Updated! %(p.x) %(p.y)") // 1, 3
         );
 }
