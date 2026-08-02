@@ -22,6 +22,8 @@ pub const module = bindings.module;
 pub const List = bindings.List;
 /// A borrowed, typed view of a Wren map passed to a foreign method.
 pub const Map = bindings.Map;
+/// An allocated string consumed and freed after being copied into Wren.
+pub const OwnedString = bindings.OwnedString;
 
 /// Describes an error reported by the Wren VM.
 pub const ErrorType = enum {

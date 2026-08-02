@@ -6,6 +6,8 @@ const slots = @import("slots.zig");
 pub const List = slots.List;
 /// A borrowed, typed view of a Wren map.
 pub const Map = slots.Map;
+/// An allocated string consumed and freed after being copied into Wren.
+pub const OwnedString = slots.OwnedString;
 
 /// Identifies how a Zig function is exposed in a generated Wren class.
 pub const MethodKind = enum { static, instance, getter, setter };

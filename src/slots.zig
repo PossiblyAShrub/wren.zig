@@ -4,6 +4,30 @@ const raw = @import("wren_raw");
 /// Internal signal that a codec has already aborted the active Wren fiber.
 pub const Error = error{BindingAborted};
 
+/// An allocated string whose ownership is transferred to Wren when returned
+/// from a bound function. The binder copies `bytes` into Wren and then frees
+/// them with `allocator`.
+pub const OwnedString = struct {
+    bytes: []u8,
+    allocator: std.mem.Allocator,
+
+    /// Takes ownership of an existing allocation.
+    pub fn init(allocator: std.mem.Allocator, bytes: []u8) OwnedString {
+        return .{ .bytes = bytes, .allocator = allocator };
+    }
+
+    /// Allocates and owns a copy of `bytes`.
+    pub fn fromSlice(allocator: std.mem.Allocator, bytes: []const u8) !OwnedString {
+        return init(allocator, try allocator.dupe(u8, bytes));
+    }
+
+    /// Frees the string without returning it to Wren.
+    pub fn deinit(self: *OwnedString) void {
+        self.allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
 // Read as big-endian bytes, this is ASCII "WRENZIG" followed by layout
 // version 1. It distinguishes storage created by this binder from arbitrary
 // foreign storage before we inspect the type tag or value.
@@ -187,6 +211,12 @@ fn slotKind(comptime T: type) ?enum { list, map } {
 
 /// Checks that `T` can be decoded from a Wren slot.
 pub fn validateReadable(comptime T: type) void {
+    if (T == []u8) {
+        @compileError("mutable []u8 cannot borrow Wren string memory; use []const u8 for string arguments");
+    }
+    if (T == OwnedString) {
+        @compileError("OwnedString transfers ownership to Wren and can only be used as a return type");
+    }
     if (T == f64 or T == bool or T == []const u8) return;
     switch (@typeInfo(T)) {
         .optional => |info| validateReadable(info.child),
@@ -197,7 +227,10 @@ pub fn validateReadable(comptime T: type) void {
 
 /// Checks that `T` can be encoded into a Wren slot.
 pub fn validateWritable(comptime T: type) void {
-    if (T == void or T == f64 or T == bool or T == []const u8) return;
+    if (T == []u8) {
+        @compileError("returning []u8 has ambiguous ownership; return wren.OwnedString instead");
+    }
+    if (T == void or T == f64 or T == bool or T == []const u8 or T == OwnedString) return;
     switch (@typeInfo(T)) {
         .optional => |info| validateWritable(info.child),
         else => if (slotKind(T) == null) @compileError("unsupported Wren return type: " ++ @typeName(T)),
@@ -206,6 +239,12 @@ pub fn validateWritable(comptime T: type) void {
 
 /// Decodes slot `slot` into the requested Zig type or aborts the Wren fiber.
 pub fn read(comptime T: type, vm: ?*raw.WrenVM, slot: c_int) Error!T {
+    if (T == []u8) {
+        @compileError("mutable []u8 cannot borrow Wren string memory; use []const u8 for string arguments");
+    }
+    if (T == OwnedString) {
+        @compileError("OwnedString transfers ownership to Wren and can only be used as a return type");
+    }
     if (T == f64) {
         try expectType(vm, slot, raw.WREN_TYPE_NUM, "Num");
         return raw.wrenGetSlotDouble(vm, slot);
@@ -241,6 +280,9 @@ pub fn read(comptime T: type, vm: ?*raw.WrenVM, slot: c_int) Error!T {
 
 /// Encodes a supported Zig value into a Wren slot.
 pub fn write(comptime T: type, vm: ?*raw.WrenVM, slot: c_int, value: T) Error!void {
+    if (T == []u8) {
+        @compileError("returning []u8 has ambiguous ownership; return wren.OwnedString instead");
+    }
     if (T == void) {
         raw.wrenSetSlotNull(vm, slot);
         return;
@@ -255,6 +297,12 @@ pub fn write(comptime T: type, vm: ?*raw.WrenVM, slot: c_int, value: T) Error!vo
     }
     if (T == []const u8) {
         raw.wrenSetSlotBytes(vm, slot, value.ptr, value.len);
+        return;
+    }
+    if (T == OwnedString) {
+        var owned = value;
+        defer owned.deinit();
+        raw.wrenSetSlotBytes(vm, slot, owned.bytes.ptr, owned.bytes.len);
         return;
     }
 

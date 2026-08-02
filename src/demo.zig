@@ -62,10 +62,10 @@ const Point = struct {
     }
 };
 
-fn say_hi(name: []const u8) ![]u8 {
+fn say_hi(name: []const u8) !wren.OwnedString {
     const gpa = std.heap.smp_allocator;
     const str = try std.fmt.allocPrint(gpa, "Hi {s}!", .{name});
-    return str;
+    return .init(gpa, str);
 }
 
 const DemoModule = wren.module(.{
@@ -95,7 +95,7 @@ const DemoModule = wren.module(.{
 });
 
 const OtherModule = wren.module(.{
-    .module = "Other.wren",
+    .module = "other.wren",
     .classes = .{
         wren.Class(.{
             .name = "Greeter",
@@ -111,7 +111,7 @@ pub fn main() !void {
     var vm = try wren.Vm.init(gpa, .{
         .writeFn = wrenWriteFn,
         .errorFn = wrenErrorFn,
-        .modules = .{DemoModule, OtherModule},
+        .modules = .{ DemoModule, OtherModule },
     });
     defer vm.deinit(gpa);
 

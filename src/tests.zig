@@ -47,6 +47,12 @@ fn byteLength(value: []const u8) f64 {
     return @floatFromInt(value.len);
 }
 
+fn allocatedGreeting(name: []const u8) !wren.OwnedString {
+    const gpa = std.testing.allocator;
+    const str = try std.fmt.allocPrint(gpa, "Hello, {s}!", .{name});
+    return .init(gpa, str);
+}
+
 fn optionalNumber(value: ?f64) ?f64 {
     return value;
 }
@@ -78,6 +84,7 @@ const Bindings = wren.module(.{
             .methods = .{
                 wren.Static("echo", echo),
                 wren.Static("byteLength", byteLength),
+                wren.Static("allocatedGreeting", allocatedGreeting),
                 wren.Static("optionalNumber", optionalNumber),
                 wren.Static("inspectList", inspectList),
                 wren.Static("inspectMap", inspectMap),
@@ -159,6 +166,7 @@ test "generated binding source" {
         \\class Bridge {
         \\  foreign static echo(arg0)
         \\  foreign static byteLength(arg0)
+        \\  foreign static allocatedGreeting(arg0)
         \\  foreign static optionalNumber(arg0)
         \\  foreign static inspectList(arg0)
         \\  foreign static inspectMap(arg0)
@@ -199,6 +207,7 @@ test "strings, nulls, lists, maps, and foreign arguments" {
         \\import "bindings.wren" for Bridge, Point
         \\if (Bridge.echo("alpha") != "alpha") Fiber.abort("bad string")
         \\if (Bridge.byteLength("a\u0000b") != 3) Fiber.abort("bad byte string")
+        \\if (Bridge.allocatedGreeting("Wren") != "Hello, Wren!") Fiber.abort("bad owned string")
         \\if (Bridge.optionalNumber(null) != null) Fiber.abort("bad null")
         \\if (Bridge.optionalNumber(12) != 12) Fiber.abort("bad optional")
         \\if (Bridge.inspectList([1, 2]) != 7) Fiber.abort("bad list")
