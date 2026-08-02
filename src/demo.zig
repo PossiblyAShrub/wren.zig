@@ -1,11 +1,11 @@
 const std = @import("std");
 const wren = @import("wren");
 
-fn wrenWriteFn(text: [*c]const u8) void {
+fn wrenWriteFn(text: []const u8) void {
     std.debug.print("{s}", .{text});
 }
 
-fn wrenErrorFn(errorType: wren.ErrorType, module: [*c]const u8, line: c_int, message: [*c]const u8) void {
+fn wrenErrorFn(errorType: wren.ErrorType, module: ?[]const u8, line: i32, message: []const u8) void {
     var errorTypeStr: []const u8 = "COMPILE ERROR";
     switch (errorType) {
         .Compile => {},
@@ -14,7 +14,7 @@ fn wrenErrorFn(errorType: wren.ErrorType, module: [*c]const u8, line: c_int, mes
     }
 
     if (module != null) {
-        std.debug.print("{s}:{} [{s}] {s}\n", .{module, line, errorTypeStr, message});
+        std.debug.print("{s}:{} [{s}] {s}\n", .{module.?, line, errorTypeStr, message});
     } else {
         std.debug.print("[{s}] {s}\n", .{errorTypeStr, message});
     }
@@ -28,5 +28,11 @@ pub fn main() !void {
     });
     defer vm.deinit(gpa);
 
-    try vm.interpret("main.wren", "System.print(\"Hello, wren!\")");
+    try vm.interpret("main.wren",
+        \\class Test {
+        \\  foreign static add1(x)
+        \\}
+        \\
+        \\System.print(Test.add1(41))
+        );
 }
