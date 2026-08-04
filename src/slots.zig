@@ -96,10 +96,6 @@ pub fn Foreign(comptime T: type) type {
             return getForeign(*T, self.value.value.vm, self.value.value.slot) catch unreachable;
         }
 
-        /// Returns the validated immutable Zig storage behind this foreign object.
-        pub fn getConst(self: @This()) *const T {
-            return getForeign(*const T, self.value.value.vm, self.value.value.slot) catch unreachable;
-        }
     };
 }
 
