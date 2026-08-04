@@ -62,10 +62,10 @@ const Point = struct {
     }
 };
 
-fn say_hi(name: []const u8) !wren.OwnedString {
-    const gpa = std.heap.smp_allocator;
-    const str = try std.fmt.allocPrint(gpa, "Hi {s}!", .{name});
-    return .init(gpa, str);
+fn say_hi(ctx: *wren.Context, name: []const u8) !wren.String {
+    var buffer: [128]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "Hi {s}!", .{name});
+    return ctx.string(text);
 }
 
 const DemoModule = wren.module(.{

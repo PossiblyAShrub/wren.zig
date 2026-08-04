@@ -22,9 +22,10 @@ fn writeFn(_: *void, text: []const u8) void {
     std.debug.print("{s}", .{text});
 }
 
-fn say_hi(name: []const u8) !wren.OwnedString {
-    const str = try std.fmt.allocPrint(gpa, "Hi {s}!", .{name});
-    return .init(gpa, str);
+fn say_hi(ctx: *wren.Context, name: []const u8) !wren.String {
+    var buffer: [128]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "Hi {s}!", .{name});
+    return ctx.string(text);
 }
 
 const DemoModule = wren.module(.{
@@ -99,16 +100,34 @@ const MathModule = wren.module(.{
             .methods = .{
                 wren.Method("translate", Point.translate),
                 wren.Getter("length", Point.length),
-                wren.Getter("x", Point.getX),
-                wren.Setter("x", Point.setX),
-                wren.Getter("y", Point.getY),
-                wren.Setter("y", Point.setY),
+                wren.Property("x", "x", .read_write),
+                wren.Property("y", "y", .read_write),
             },
             .finalizer = null,
         }),
     },
 });
 ```
+
+Functions that need VM-owned values can opt into a context. Values created by
+the context are owned by Wren and are valid for the duration of the callback.
+Registered foreign Zig values are automatically materialized into Wren foreign
+objects when returned.
+
+```zig
+fn makePoint(_: *wren.Context, x: f64) Point {
+    return .{ .x = x, .y = 0 };
+}
+
+fn makeList(ctx: *wren.Context) wren.List {
+    return ctx.list();
+}
+```
+
+Use `ctx.retain(value)` when a Wren value must be kept beyond the callback;
+release the returned handle when it is no longer needed. Ordinary functions
+without a context parameter continue to bind directly from their Zig
+signature.
 
 ## Testing
 

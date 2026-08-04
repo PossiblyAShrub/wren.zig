@@ -1,6 +1,7 @@
 const std = @import("std");
 const raw = @import("wren_raw");
 const bindings = @import("bindings.zig");
+const context = @import("context.zig");
 
 /// Declares a foreign static method in a generated Wren class.
 pub const Static = bindings.Static;
@@ -22,8 +23,22 @@ pub const module = bindings.module;
 pub const List = bindings.List;
 /// A borrowed, typed view of a Wren map passed to a foreign method.
 pub const Map = bindings.Map;
-/// An allocated string consumed and freed after being copied into Wren.
-pub const OwnedString = bindings.OwnedString;
+/// A Wren-owned string value.
+pub const String = bindings.String;
+/// A callback-scoped value stored in a Wren VM slot.
+pub const Value = bindings.Value;
+/// A rooted Wren value that must be explicitly released.
+pub const Handle = bindings.Handle;
+/// Typed access to the active Wren VM.
+pub const Context = bindings.Context;
+pub const Bool = bindings.Bool;
+pub const Num = bindings.Num;
+pub const Null = bindings.Null;
+pub const Object = bindings.Object;
+pub const Foreign = bindings.Foreign;
+/// Generates Wren property accessors for a foreign struct field.
+pub const Property = bindings.Property;
+pub const PropertyMode = bindings.PropertyMode;
 
 /// Describes an error reported by the Wren VM.
 pub const ErrorType = enum {
@@ -88,6 +103,7 @@ pub fn Vm(comptime T: type) type {
         pub const InterpretError = error{ CompileError, RuntimeError };
 
         const VmData = struct {
+            runtime: context.RuntimeData,
             config: RuntimeConfig,
             raw_vm: ?*raw.WrenVM = null,
             user_data: ?*T,
@@ -117,7 +133,13 @@ pub fn Vm(comptime T: type) type {
             };
 
             const data = try gpa.create(VmData);
-            data.* = .{ .config = runtime_config, .user_data = user_data };
+            data.* = .{
+                .runtime = .{
+                    .allocator = gpa,
+                },
+                .config = runtime_config,
+                .user_data = user_data,
+            };
             var vm_created = false;
             errdefer if (!vm_created) gpa.destroy(data);
 

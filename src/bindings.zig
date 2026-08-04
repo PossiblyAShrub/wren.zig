@@ -6,11 +6,20 @@ const slots = @import("slots.zig");
 pub const List = slots.List;
 /// A borrowed, typed view of a Wren map.
 pub const Map = slots.Map;
-/// An allocated string consumed and freed after being copied into Wren.
-pub const OwnedString = slots.OwnedString;
+pub const String = slots.String;
+pub const Value = slots.Value;
+pub const Handle = slots.Handle;
+pub const Context = slots.Context;
+pub const Bool = slots.Bool;
+pub const Num = slots.Num;
+pub const Null = slots.Null;
+pub const Object = slots.Object;
+pub const Foreign = slots.Foreign;
 
 /// Identifies how a Zig function is exposed in a generated Wren class.
-pub const MethodKind = enum { static, instance, getter, setter };
+pub const MethodKind = enum { static, instance, getter, setter, property };
+
+pub const PropertyMode = enum { read_only, read_write };
 
 fn MethodSpec(comptime Func: type) type {
     return struct {
@@ -22,6 +31,17 @@ fn MethodSpec(comptime Func: type) type {
 
 fn method(comptime kind: MethodKind, comptime name: []const u8, comptime func: anytype) MethodSpec(@TypeOf(func)) {
     return .{ .kind = kind, .wren_name = name, .function = func };
+}
+
+/// Declares a property backed directly by a field on a foreign Zig value.
+/// The field name is a Zig field name; the first name is the Wren property.
+pub fn Property(comptime name: []const u8, comptime field_name: []const u8, comptime mode: PropertyMode) struct {
+    kind: MethodKind = .property,
+    wren_name: []const u8 = name,
+    field_name: []const u8 = field_name,
+    mode: PropertyMode = mode,
+} {
+    return .{};
 }
 
 /// Declares a foreign static method named `name` backed by `func`.
@@ -115,11 +135,17 @@ pub fn module(comptime config: anytype) type {
             inline for (config.classes) |class| {
                 if (std.mem.eql(u8, class_name, class.name)) {
                     inline for (class.methods) |bound_method| {
-                        if ((bound_method.kind == .static) == is_static and
-                            std.mem.eql(u8, requested_signature, methodSignature(class, bound_method)))
-                        {
-                            if (bound_method.kind == .static) return wrap(null, bound_method.function);
-                            return wrap(class.foreign_type, bound_method.function);
+                        if ((bound_method.kind == .static) == is_static) {
+                            if (bound_method.kind == .property) {
+                                if (std.mem.eql(u8, requested_signature, bound_method.wren_name))
+                                    return propertyWrap(class.foreign_type, bound_method.field_name, false);
+                                if (bound_method.mode == .read_write and
+                                    std.mem.eql(u8, requested_signature, bound_method.wren_name ++ "=(_)"))
+                                    return propertyWrap(class.foreign_type, bound_method.field_name, true);
+                            } else if (std.mem.eql(u8, requested_signature, methodSignature(class, bound_method))) {
+                                if (bound_method.kind == .static) return wrap(config, null, bound_method.function);
+                                return wrap(config, class.foreign_type, bound_method.function);
+                            }
                         }
                     }
                 }
@@ -224,13 +250,53 @@ fn payloadType(comptime Return: type) type {
     };
 }
 
-fn decodeArgs(comptime Owner: ?type, comptime func: anytype, vm: ?*raw.WrenVM) slots.Error!std.meta.ArgsTuple(@TypeOf(func)) {
+fn isContextType(comptime T: type) bool {
+    return T == *slots.Context;
+}
+
+fn foreignClassName(comptime config: anytype, comptime T: type) []const u8 {
+    inline for (config.classes) |class| {
+        if (class.is_foreign and class.foreign_type == T) return class.name;
+    }
+    @compileError("foreign return type is not registered in this module: " ++ @typeName(T));
+}
+
+fn isRegisteredForeign(comptime config: anytype, comptime T: type) bool {
+    inline for (config.classes) |class| {
+        if (class.is_foreign and class.foreign_type == T) return true;
+    }
+    return false;
+}
+
+fn contextIndex(comptime Owner: ?type, comptime func: anytype) ?usize {
+    const info = functionInfo(func);
+    const first = if (Owner == null) 0 else 1;
+    if (info.params.len > first and isContextType(info.params[first].type.?)) return first;
+    return null;
+}
+
+fn contextType(comptime Owner: ?type, comptime func: anytype) type {
+    const index = contextIndex(Owner, func) orelse return void;
+    _ = index;
+    return slots.Context;
+}
+
+fn decodeArgs(comptime Owner: ?type, comptime func: anytype, vm: ?*raw.WrenVM, context_ptr: ?*anyopaque) slots.Error!std.meta.ArgsTuple(@TypeOf(func)) {
     const info = functionInfo(func);
     var args: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
+    const context_at = comptime contextIndex(Owner, func);
     inline for (info.params, 0..) |param, index| {
         const T = param.type.?;
         if (Owner != null and index == 0) {
-            args[index] = try slots.getForeign(T, vm, 0);
+            args[index] = try slots.read(T, vm, 0);
+        } else if (comptime context_at != null) {
+            if (index == context_at.?) {
+                args[index] = @ptrCast(@alignCast(context_ptr.?));
+            } else {
+                const receiver_count: usize = if (Owner == null) 0 else 1;
+                const context_count: usize = if (comptime index > context_at.?) 1 else 0;
+                args[index] = try slots.read(T, vm, @intCast(index + 1 - receiver_count - context_count));
+            }
         } else {
             const receiver_count: usize = if (Owner == null) 0 else 1;
             args[index] = try slots.read(T, vm, @intCast(index + 1 - receiver_count));
@@ -239,7 +305,28 @@ fn decodeArgs(comptime Owner: ?type, comptime func: anytype, vm: ?*raw.WrenVM) s
     return args;
 }
 
-fn callAndWrite(comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), vm: ?*raw.WrenVM) void {
+fn writeResult(comptime config: anytype, comptime Return: type, value: Return, vm: ?*raw.WrenVM) void {
+    if (comptime isRegisteredForeign(config, Return)) {
+        const T = Return;
+        const class_slot = scratchSlots(vm, 1);
+        raw.wrenGetVariable(vm, config.module.ptr, foreignClassName(config, T).ptr, class_slot);
+        const storage = raw.wrenSetSlotNewForeign(vm, 0, class_slot, slots.foreignAllocationSize(T)) orelse {
+            slots.abortMessage(vm, "Failed to allocate returned foreign object");
+            return;
+        };
+        slots.initForeign(T, storage, value);
+        return;
+    }
+    slots.write(Return, vm, 0, value) catch {};
+}
+
+fn scratchSlots(vm: ?*raw.WrenVM, count: c_int) c_int {
+    const first = raw.wrenGetSlotCount(vm);
+    raw.wrenEnsureSlots(vm, first + count);
+    return first;
+}
+
+fn callAndWrite(comptime config: anytype, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)), vm: ?*raw.WrenVM) void {
     const Return = functionInfo(func).return_type orelse @compileError("function must have a return type");
     switch (@typeInfo(Return)) {
         .error_union => |info| {
@@ -247,20 +334,39 @@ fn callAndWrite(comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func)),
                 if (err != error.BindingAborted) slots.abortMessage(vm, @errorName(err));
                 return;
             };
-            slots.write(info.payload, vm, 0, result) catch {};
+            writeResult(config, info.payload, result, vm);
         },
         else => {
             const result: Return = @call(.auto, func, args);
-            slots.write(Return, vm, 0, result) catch {};
+            writeResult(config, Return, result, vm);
         },
     }
 }
 
-fn wrap(comptime Owner: ?type, comptime func: anytype) raw.WrenForeignMethodFn {
+fn wrap(comptime config: anytype, comptime Owner: ?type, comptime func: anytype) raw.WrenForeignMethodFn {
     return struct {
         fn callback(vm: ?*raw.WrenVM) callconv(.c) void {
-            const args = decodeArgs(Owner, func, vm) catch return;
-            callAndWrite(func, args, vm);
+            const ContextType = contextType(Owner, func);
+            var context: ContextType = undefined;
+            if (comptime ContextType != void) context = .{ .vm = vm };
+            const context_ptr: ?*anyopaque = if (comptime ContextType == void) null else @ptrCast(&context);
+            const args = decodeArgs(Owner, func, vm, context_ptr) catch return;
+            callAndWrite(config, func, args, vm);
+        }
+    }.callback;
+}
+
+fn propertyWrap(comptime T: type, comptime field_name: []const u8, comptime setter: bool) raw.WrenForeignMethodFn {
+    return struct {
+        fn callback(vm: ?*raw.WrenVM) callconv(.c) void {
+            const receiver = slots.getForeign(*T, vm, 0) catch return;
+            const Field = @TypeOf(@field(receiver.*, field_name));
+            if (setter) {
+                const value = slots.read(Field, vm, 1) catch return;
+                @field(receiver.*, field_name) = value;
+            } else {
+                slots.write(Field, vm, 0, @field(receiver.*, field_name)) catch {};
+            }
         }
     }.callback;
 }
@@ -268,7 +374,11 @@ fn wrap(comptime Owner: ?type, comptime func: anytype) raw.WrenForeignMethodFn {
 fn allocator(comptime T: type, comptime constructor: anytype) raw.WrenForeignMethodFn {
     return struct {
         fn allocate(vm: ?*raw.WrenVM) callconv(.c) void {
-            const args = decodeArgs(null, constructor, vm) catch return;
+            const ContextType = contextType(null, constructor);
+            var context: ContextType = undefined;
+            if (comptime ContextType != void) context = .{ .vm = vm };
+            const context_ptr: ?*anyopaque = if (comptime ContextType == void) null else @ptrCast(&context);
+            const args = decodeArgs(null, constructor, vm, context_ptr) catch return;
             const Return = functionInfo(constructor).return_type.?;
             const value: T = switch (@typeInfo(Return)) {
                 .error_union => @call(.auto, constructor, args) catch |err| {
@@ -297,13 +407,22 @@ fn finalizer(comptime T: type, comptime func: anytype) raw.WrenFinalizerFn {
 }
 
 fn exposedArity(comptime bound_method: anytype) usize {
+    if (comptime bound_method.kind == .property) return if (comptime bound_method.mode == .read_write) 1 else 0;
     const count = functionInfo(bound_method.function).params.len;
-    return if (bound_method.kind == .static) count else count - 1;
+    const receiver_count: usize = if (comptime bound_method.kind == .static) 0 else 1;
+    const context_at = comptime contextParam(bound_method.kind, bound_method.function);
+    const result = count - receiver_count - if (context_at != null) 1 else 0;
+    return result;
+}
+
+fn contextParam(comptime kind: MethodKind, comptime func: anytype) ?usize {
+    return contextIndex(if (kind == .static) null else @as(?type, u8), func);
 }
 
 const ArgumentStyle = enum { signature, declaration };
 
 fn arguments(comptime arity: usize, comptime style: ArgumentStyle) []const u8 {
+    @setEvalBranchQuota(100000);
     comptime var result: []const u8 = "(";
     inline for (0..arity) |index| {
         if (index != 0) result = result ++ switch (style) {
@@ -320,22 +439,22 @@ fn arguments(comptime arity: usize, comptime style: ArgumentStyle) []const u8 {
 
 fn methodSignature(comptime class: anytype, comptime bound_method: anytype) []const u8 {
     _ = class;
-    const args = comptime arguments(exposedArity(bound_method), .signature);
-    return switch (bound_method.kind) {
+    return comptime switch (bound_method.kind) {
+        .property => bound_method.wren_name,
         .getter => bound_method.wren_name,
         .setter => bound_method.wren_name ++ "=(_)",
-        .static, .instance => bound_method.wren_name ++ args,
+        .static, .instance => bound_method.wren_name ++ arguments(exposedArity(bound_method), .signature),
     };
 }
 
 fn methodDeclaration(comptime class: anytype, comptime bound_method: anytype) []const u8 {
     _ = class;
-    const args = comptime arguments(exposedArity(bound_method), .declaration);
-    return switch (bound_method.kind) {
-        .static => "static " ++ bound_method.wren_name ++ args,
-        .instance => bound_method.wren_name ++ args,
+    return comptime switch (bound_method.kind) {
+        .property => bound_method.wren_name,
+        .static => "static " ++ bound_method.wren_name ++ arguments(exposedArity(bound_method), .declaration),
+        .instance => bound_method.wren_name ++ arguments(exposedArity(bound_method), .declaration),
         .getter => bound_method.wren_name,
-        .setter => bound_method.wren_name ++ "=" ++ args,
+        .setter => bound_method.wren_name ++ "=" ++ arguments(exposedArity(bound_method), .declaration),
     };
 }
 
@@ -349,6 +468,9 @@ fn generateSource(comptime config: anytype) [:0]const u8 {
         }
         inline for (class.methods) |bound_method| {
             source = source ++ "  foreign " ++ methodDeclaration(class, bound_method) ++ "\n";
+            if (bound_method.kind == .property and bound_method.mode == .read_write) {
+                source = source ++ "  foreign " ++ bound_method.wren_name ++ "=(arg0)\n";
+            }
         }
         source = source ++ "}\n\n";
     }
@@ -367,7 +489,7 @@ fn validateApi(comptime config: anytype) void {
         }
         if (class.is_foreign) validateConstructor(class);
         inline for (class.methods, 0..) |bound_method, method_index| {
-            validateMethod(class, bound_method);
+            validateMethod(config, class, bound_method);
             inline for (class.methods, 0..) |other, other_index| {
                 if (other_index > method_index and
                     (bound_method.kind == .static) == (other.kind == .static) and
@@ -385,7 +507,11 @@ fn validateConstructor(comptime class: anytype) void {
     const Return = info.return_type orelse @compileError("constructor must return a value");
     if (payloadType(Return) != class.foreign_type)
         @compileError("constructor for " ++ class.name ++ " must return " ++ @typeName(class.foreign_type));
-    inline for (info.params) |param| slots.validateReadable(param.type.?);
+    const context_at = contextIndex(null, class.constructor.function);
+    inline for (info.params, 0..) |param, index| {
+        if (context_at != null and index == context_at.?) continue;
+        slots.validateReadable(param.type.?);
+    }
     validateFinalizer(class.foreign_type, class.finalizer);
 }
 
@@ -396,20 +522,40 @@ fn validateFinalizer(comptime T: type, comptime func: anytype) void {
         @compileError("foreign finalizer must have signature fn (*" ++ @typeName(T) ++ ") void");
 }
 
-fn validateMethod(comptime class: anytype, comptime bound_method: anytype) void {
+fn validateMethod(comptime config: anytype, comptime class: anytype, comptime bound_method: anytype) void {
     if (bound_method.wren_name.len == 0) @compileError("Wren method name cannot be empty");
+    if (bound_method.kind == .property) {
+        if (!class.is_foreign) @compileError("properties require a foreign class");
+        if (!@hasField(class.foreign_type, bound_method.field_name))
+            @compileError("unknown property field " ++ bound_method.field_name ++ " on " ++ @typeName(class.foreign_type));
+        const Field = @TypeOf(@field(@as(class.foreign_type, undefined), bound_method.field_name));
+        slots.validateWritable(Field);
+        if (bound_method.mode == .read_write) slots.validateReadable(Field);
+        return;
+    }
     const info = functionInfo(bound_method.function);
     const receiver_count: usize = if (bound_method.kind == .static) 0 else 1;
     if (receiver_count == 1) {
         if (!class.is_foreign) @compileError("instance methods require a foreign class");
         if (info.params.len == 0) @compileError("instance method requires a receiver");
         const Receiver = info.params[0].type.?;
-        if (Receiver != *class.foreign_type and Receiver != *const class.foreign_type)
+        const receiver_is_foreign = Receiver == slots.Foreign(class.foreign_type);
+        if (!receiver_is_foreign and Receiver != *class.foreign_type and Receiver != *const class.foreign_type)
             @compileError("invalid receiver for " ++ class.name);
     }
     const arity = info.params.len - receiver_count;
-    if (bound_method.kind == .getter and arity != 0) @compileError("Wren getter must take no arguments");
-    if (bound_method.kind == .setter and arity != 1) @compileError("Wren setter must take one argument");
-    inline for (info.params[receiver_count..]) |param| slots.validateReadable(param.type.?);
-    slots.validateWritable(payloadType(info.return_type orelse @compileError("function must have a return type")));
+    const context_at = contextParam(bound_method.kind, bound_method.function);
+    const exposed = arity - if (context_at != null) 1 else 0;
+    if (bound_method.kind == .getter and exposed != 0) @compileError("Wren getter must take no arguments");
+    if (bound_method.kind == .setter and exposed != 1) @compileError("Wren setter must take one argument");
+    inline for (info.params[receiver_count..], receiver_count..) |param, index| {
+        if (context_at != null and index == context_at.?) continue;
+        slots.validateReadable(param.type.?);
+    }
+    const Return = payloadType(info.return_type orelse @compileError("function must have a return type"));
+    if (comptime isRegisteredForeign(config, Return)) {
+        _ = foreignClassName(config, Return);
+    } else {
+        slots.validateWritable(Return);
+    }
 }

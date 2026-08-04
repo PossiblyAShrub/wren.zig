@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
 
     const mod_tests = b.addTest(.{
         .root_module = b.addModule("wren_test", .{
-            .root_source_file = b.path("src/tests.zig"),
+            .root_source_file = b.path("test/root.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -58,7 +58,7 @@ pub fn build(b: *std.Build) void {
     const exe_demo = b.addExecutable(.{
         .name = "wren_demo",
         .root_module = b.addModule("wren_demo_mod", .{
-            .root_source_file = b.path("src/demo.zig"),
+            .root_source_file = b.path("demo/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{

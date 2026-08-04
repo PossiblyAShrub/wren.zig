@@ -1,32 +1,175 @@
 const std = @import("std");
 const raw = @import("wren_raw");
+const runtime = @import("context.zig");
+
+/// A value stored in a temporary Wren slot. It is valid only while the active
+/// foreign callback is running.
+pub const Value = struct {
+    vm: ?*raw.WrenVM,
+    slot: c_int,
+
+    pub fn typeOf(self: Value) raw.WrenType {
+        return raw.wrenGetSlotType(self.vm, self.slot);
+    }
+
+    pub fn asBool(self: Value) Error!bool {
+        return read(bool, self.vm, self.slot);
+    }
+
+    pub fn asNum(self: Value) Error!f64 {
+        return read(f64, self.vm, self.slot);
+    }
+
+    pub fn asString(self: Value) Error!String {
+        _ = try readString(self.vm, self.slot);
+        return .{ .value = self };
+    }
+
+    pub fn asList(self: Value) Error!List {
+        try expectType(self.vm, self.slot, raw.WREN_TYPE_LIST, "List");
+        return .{ .value = self };
+    }
+
+    pub fn asMap(self: Value) Error!Map {
+        try expectType(self.vm, self.slot, raw.WREN_TYPE_MAP, "Map");
+        return .{ .value = self };
+    }
+
+    pub fn asObject(self: Value) Error!Object {
+        if (self.typeOf() == raw.WREN_TYPE_NULL or self.typeOf() == raw.WREN_TYPE_NUM or self.typeOf() == raw.WREN_TYPE_BOOL)
+            return error.BindingAborted;
+        return .{ .value = self };
+    }
+};
+
+pub const Bool = struct {
+    value: Value,
+    pub fn get(self: Bool) Error!bool {
+        return self.value.asBool();
+    }
+};
+pub const Num = struct {
+    value: Value,
+    pub fn get(self: Num) Error!f64 {
+        return self.value.asNum();
+    }
+};
+pub const Null = struct {
+    value: Value,
+    pub fn valueRef(self: Null) Value {
+        return self.value;
+    }
+};
+pub const String = struct {
+    value: Value,
+
+    pub fn bytes(self: String) Error![]const u8 {
+        return readString(self.value.vm, self.value.slot);
+    }
+};
+pub const Object = struct {
+    value: Value,
+    pub fn typeOf(self: Object) raw.WrenType {
+        return self.value.typeOf();
+    }
+};
+
+pub fn Foreign(comptime T: type) type {
+    return struct {
+        pub const wren_foreign_type = T;
+        value: Object,
+
+        pub fn fromObject(item: Object) Error!@This() {
+            _ = try getForeign(*T, item.value.vm, item.value.slot);
+            return .{ .value = item };
+        }
+
+        pub fn object(self: @This()) Object {
+            return self.value;
+        }
+
+        pub fn get(self: @This()) Error!*T {
+            return getForeign(*T, self.value.value.vm, self.value.value.slot);
+        }
+
+        pub fn getConst(self: @This()) Error!*const T {
+            return getForeign(*const T, self.value.value.vm, self.value.value.slot);
+        }
+    };
+}
+
+/// A rooted Wren value that may outlive the callback that created it.
+pub const Handle = struct {
+    vm: ?*raw.WrenVM,
+    handle: *raw.WrenHandle,
+
+    pub fn set(self: Handle, slot: c_int) void {
+        raw.wrenSetSlotHandle(self.vm, slot, self.handle);
+    }
+
+    pub fn release(self: *Handle) void {
+        raw.wrenReleaseHandle(self.vm, self.handle);
+        self.* = undefined;
+    }
+};
+
+/// VM-facing helpers available to context-aware bound functions.
+pub const Context = struct {
+    pub const wren_context = true;
+    const Self = @This();
+    vm: ?*raw.WrenVM,
+
+    pub fn allocator(self: Self) std.mem.Allocator {
+        return runtime.runtimeData(self.vm).allocator;
+    }
+
+    pub fn value(self: Self, slot: c_int) Value {
+        return .{ .vm = self.vm, .slot = slot };
+    }
+
+    pub fn string(self: Self, bytes: []const u8) String {
+        const slot = scratchSlots(self.vm, 1);
+        raw.wrenSetSlotBytes(self.vm, slot, bytes.ptr, bytes.len);
+        return .{ .value = self.value(slot) };
+    }
+
+    pub fn list(self: Self) List {
+        const slot = scratchSlots(self.vm, 1);
+        raw.wrenSetSlotNewList(self.vm, slot);
+        return .{ .value = self.value(slot) };
+    }
+
+    pub fn map(self: Self) Map {
+        const slot = scratchSlots(self.vm, 1);
+        raw.wrenSetSlotNewMap(self.vm, slot);
+        return .{ .value = self.value(slot) };
+    }
+
+    pub fn retain(self: Self, item: anytype) !Handle {
+        const item_value = toValue(item);
+        if (item_value.vm != self.vm) return error.WrongVm;
+        const handle = raw.wrenGetSlotHandle(self.vm, item_value.slot) orelse return error.OutOfMemory;
+        return .{ .vm = self.vm, .handle = handle };
+    }
+};
 
 /// Internal signal that a codec has already aborted the active Wren fiber.
 pub const Error = error{BindingAborted};
 
-/// An allocated string whose ownership is transferred to Wren when returned
-/// from a bound function. The binder copies `bytes` into Wren and then frees
-/// them with `allocator`.
-pub const OwnedString = struct {
-    bytes: []u8,
-    allocator: std.mem.Allocator,
+fn toValue(value: anytype) Value {
+    const T = @TypeOf(value);
+    if (T == Value) return value;
+    if (T == String or T == List or T == Map or T == Object or T == Num or T == Bool or T == Null) return value.value;
+    if (comptime isForeignWrapper(T)) return value.value.value;
+    @compileError("value is not a Wren value wrapper: " ++ @typeName(T));
+}
 
-    /// Takes ownership of an existing allocation.
-    pub fn init(allocator: std.mem.Allocator, bytes: []u8) OwnedString {
-        return .{ .bytes = bytes, .allocator = allocator };
-    }
-
-    /// Allocates and owns a copy of `bytes`.
-    pub fn fromSlice(allocator: std.mem.Allocator, bytes: []const u8) !OwnedString {
-        return init(allocator, try allocator.dupe(u8, bytes));
-    }
-
-    /// Frees the string without returning it to Wren.
-    pub fn deinit(self: *OwnedString) void {
-        self.allocator.free(self.bytes);
-        self.* = undefined;
-    }
-};
+fn isForeignWrapper(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => @hasDecl(T, "wren_foreign_type"),
+        else => false,
+    };
+}
 
 // Read as big-endian bytes, this is ASCII "WRENZIG" followed by layout
 // version 1. It distinguishes storage created by this binder from arbitrary
@@ -100,99 +243,87 @@ pub fn finalizeForeign(comptime T: type, data: ?*anyopaque) ?*T {
 
 /// Returns a borrowed typed view over a Wren list argument.
 /// The view and values borrowed from it must not outlive the foreign callback.
-pub fn List(comptime T: type) type {
-    return struct {
-        pub const wren_slot_kind = .list;
-        const Self = @This();
+pub const List = struct {
+    const Self = @This();
+    value: Value,
 
-        vm: ?*raw.WrenVM,
-        slot: c_int,
+    /// Returns the current number of list elements.
+    pub fn len(self: Self) usize {
+        return @intCast(raw.wrenGetListCount(self.value.vm, self.value.slot));
+    }
 
-        /// Returns the current number of list elements.
-        pub fn len(self: Self) usize {
-            return @intCast(raw.wrenGetListCount(self.vm, self.slot));
+    /// Reads and converts the element at `index`.
+    pub fn get(self: Self, index: usize) Error!Value {
+        if (index >= self.len()) {
+            abortMessage(self.value.vm, "List index out of bounds");
+            return error.BindingAborted;
         }
+        const scratch = scratchSlots(self.value.vm, 1);
+        raw.wrenGetListElement(self.value.vm, self.value.slot, @intCast(index), scratch);
+        return .{ .vm = self.value.vm, .slot = scratch };
+    }
 
-        /// Reads and converts the element at `index`.
-        pub fn get(self: Self, index: usize) Error!T {
-            if (index >= self.len()) {
-                abortMessage(self.vm, "List index out of bounds");
-                return error.BindingAborted;
-            }
-            const scratch = scratchSlots(self.vm, 1);
-            raw.wrenGetListElement(self.vm, self.slot, @intCast(index), scratch);
-            return read(T, self.vm, scratch);
+    /// Converts `value` and replaces the element at `index`.
+    pub fn set(self: Self, index: usize, item: anytype) Error!void {
+        if (index >= self.len()) {
+            abortMessage(self.value.vm, "List index out of bounds");
+            return error.BindingAborted;
         }
+        const scratch = scratchSlots(self.value.vm, 1);
+        try writeAny(self.value.vm, scratch, item);
+        raw.wrenSetListElement(self.value.vm, self.value.slot, @intCast(index), scratch);
+    }
 
-        /// Converts `value` and replaces the element at `index`.
-        pub fn set(self: Self, index: usize, value: T) Error!void {
-            if (index >= self.len()) {
-                abortMessage(self.vm, "List index out of bounds");
-                return error.BindingAborted;
-            }
-            const scratch = scratchSlots(self.vm, 1);
-            try write(T, self.vm, scratch, value);
-            raw.wrenSetListElement(self.vm, self.slot, @intCast(index), scratch);
-        }
-
-        /// Converts and appends `value` to the list.
-        pub fn append(self: Self, value: T) Error!void {
-            const scratch = scratchSlots(self.vm, 1);
-            try write(T, self.vm, scratch, value);
-            raw.wrenInsertInList(self.vm, self.slot, -1, scratch);
-        }
-    };
-}
+    /// Converts and appends `value` to the list.
+    pub fn append(self: Self, item: anytype) Error!void {
+        const scratch = scratchSlots(self.value.vm, 1);
+        try writeAny(self.value.vm, scratch, item);
+        raw.wrenInsertInList(self.value.vm, self.value.slot, -1, scratch);
+    }
+};
 
 /// Returns a borrowed typed view over a Wren map argument.
 /// The view and values borrowed from it must not outlive the foreign callback.
-pub fn Map(comptime K: type, comptime V: type) type {
-    return struct {
-        pub const wren_slot_kind = .map;
-        const Self = @This();
+pub const Map = struct {
+    const Self = @This();
+    value: Value,
 
-        vm: ?*raw.WrenVM,
-        slot: c_int,
+    /// Returns the current number of map entries.
+    pub fn len(self: Self) usize {
+        return @intCast(raw.wrenGetMapCount(self.value.vm, self.value.slot));
+    }
 
-        /// Returns the current number of map entries.
-        pub fn len(self: Self) usize {
-            return @intCast(raw.wrenGetMapCount(self.vm, self.slot));
-        }
+    /// Returns whether the converted `key` exists in the map.
+    pub fn contains(self: Self, key: anytype) Error!bool {
+        const scratch = scratchSlots(self.value.vm, 1);
+        try writeAny(self.value.vm, scratch, key);
+        return raw.wrenGetMapContainsKey(self.value.vm, self.value.slot, scratch);
+    }
 
-        /// Returns whether the converted `key` exists in the map.
-        pub fn contains(self: Self, key: K) Error!bool {
-            const scratch = scratchSlots(self.vm, 1);
-            try write(K, self.vm, scratch, key);
-            return raw.wrenGetMapContainsKey(self.vm, self.slot, scratch);
-        }
+    /// Retrieves and converts the value associated with `key`.
+    pub fn get(self: Self, key: anytype) Error!Value {
+        const scratch = scratchSlots(self.value.vm, 2);
+        try writeAny(self.value.vm, scratch, key);
+        raw.wrenGetMapValue(self.value.vm, self.value.slot, scratch, scratch + 1);
+        return .{ .vm = self.value.vm, .slot = scratch + 1 };
+    }
 
-        /// Retrieves and converts the value associated with `key`.
-        /// A missing key follows Wren semantics and reads as `null`, so use an
-        /// optional `V` when absence is expected.
-        pub fn get(self: Self, key: K) Error!V {
-            const scratch = scratchSlots(self.vm, 2);
-            try write(K, self.vm, scratch, key);
-            raw.wrenGetMapValue(self.vm, self.slot, scratch, scratch + 1);
-            return read(V, self.vm, scratch + 1);
-        }
+    /// Converts and associates `value` with `key`.
+    pub fn put(self: Self, key: anytype, item: anytype) Error!void {
+        const scratch = scratchSlots(self.value.vm, 2);
+        try writeAny(self.value.vm, scratch, key);
+        try writeAny(self.value.vm, scratch + 1, item);
+        raw.wrenSetMapValue(self.value.vm, self.value.slot, scratch, scratch + 1);
+    }
 
-        /// Converts and associates `value` with `key`.
-        pub fn put(self: Self, key: K, value: V) Error!void {
-            const scratch = scratchSlots(self.vm, 2);
-            try write(K, self.vm, scratch, key);
-            try write(V, self.vm, scratch + 1, value);
-            raw.wrenSetMapValue(self.vm, self.slot, scratch, scratch + 1);
-        }
-
-        /// Removes `key` and converts its previous value.
-        pub fn remove(self: Self, key: K) Error!V {
-            const scratch = scratchSlots(self.vm, 2);
-            try write(K, self.vm, scratch, key);
-            raw.wrenRemoveMapValue(self.vm, self.slot, scratch, scratch + 1);
-            return read(V, self.vm, scratch + 1);
-        }
-    };
-}
+    /// Removes `key` and converts its previous value.
+    pub fn remove(self: Self, key: anytype) Error!Value {
+        const scratch = scratchSlots(self.value.vm, 2);
+        try writeAny(self.value.vm, scratch, key);
+        raw.wrenRemoveMapValue(self.value.vm, self.value.slot, scratch, scratch + 1);
+        return .{ .vm = self.value.vm, .slot = scratch + 1 };
+    }
+};
 
 fn scratchSlots(vm: ?*raw.WrenVM, count: c_int) c_int {
     // Collection operations communicate through slots. Always grow beyond the
@@ -209,42 +340,36 @@ fn slotKind(comptime T: type) ?enum { list, map } {
     };
 }
 
-/// Checks that `T` can be decoded from a Wren slot.
 pub fn validateReadable(comptime T: type) void {
-    if (T == []u8) {
-        @compileError("mutable []u8 cannot borrow Wren string memory; use []const u8 for string arguments");
-    }
-    if (T == OwnedString) {
-        @compileError("OwnedString transfers ownership to Wren and can only be used as a return type");
-    }
-    if (T == f64 or T == bool or T == []const u8) return;
+    if (T == f64 or T == bool or T == []const u8 or T == Value or T == String or T == List or T == Map or T == Object or T == Num or T == Bool or T == Null) return;
     switch (@typeInfo(T)) {
         .optional => |info| validateReadable(info.child),
-        .pointer => |info| if (info.size != .one) @compileError("foreign values must use *T or *const T"),
-        else => if (slotKind(T) == null) @compileError("unsupported Wren argument type: " ++ @typeName(T)),
+        .pointer => |info| {
+            if (info.size != .one) @compileError("foreign values must use wren.Foreign(T)");
+        },
+        .@"struct" => if (!isForeignWrapper(T)) @compileError("unsupported Wren argument type: " ++ @typeName(T)),
+        else => @compileError("unsupported Wren argument type: " ++ @typeName(T)),
     }
 }
 
-/// Checks that `T` can be encoded into a Wren slot.
 pub fn validateWritable(comptime T: type) void {
-    if (T == []u8) {
-        @compileError("returning []u8 has ambiguous ownership; return wren.OwnedString instead");
-    }
-    if (T == void or T == f64 or T == bool or T == []const u8 or T == OwnedString) return;
+    if (T == void or T == f64 or T == bool or T == []const u8 or T == Value or T == Handle or T == String or T == List or T == Map or T == Object or T == Num or T == Bool or T == Null) return;
     switch (@typeInfo(T)) {
         .optional => |info| validateWritable(info.child),
-        else => if (slotKind(T) == null) @compileError("unsupported Wren return type: " ++ @typeName(T)),
+        .@"struct" => if (!isForeignWrapper(T)) @compileError("unsupported Wren return type: " ++ @typeName(T)),
+        else => @compileError("unsupported Wren return type: " ++ @typeName(T)),
     }
 }
 
-/// Decodes slot `slot` into the requested Zig type or aborts the Wren fiber.
+fn readString(vm: ?*raw.WrenVM, slot: c_int) Error![]const u8 {
+    try expectType(vm, slot, raw.WREN_TYPE_STRING, "String");
+    var len: c_int = 0;
+    const bytes = raw.wrenGetSlotBytes(vm, slot, &len);
+    return bytes[0..@intCast(len)];
+}
+
 pub fn read(comptime T: type, vm: ?*raw.WrenVM, slot: c_int) Error!T {
-    if (T == []u8) {
-        @compileError("mutable []u8 cannot borrow Wren string memory; use []const u8 for string arguments");
-    }
-    if (T == OwnedString) {
-        @compileError("OwnedString transfers ownership to Wren and can only be used as a return type");
-    }
+    if (T == Value) return .{ .vm = vm, .slot = slot };
     if (T == f64) {
         try expectType(vm, slot, raw.WREN_TYPE_NUM, "Num");
         return raw.wrenGetSlotDouble(vm, slot);
@@ -253,35 +378,88 @@ pub fn read(comptime T: type, vm: ?*raw.WrenVM, slot: c_int) Error!T {
         try expectType(vm, slot, raw.WREN_TYPE_BOOL, "Bool");
         return raw.wrenGetSlotBool(vm, slot);
     }
-    if (T == []const u8) {
-        try expectType(vm, slot, raw.WREN_TYPE_STRING, "String");
-        var len: c_int = 0;
-        const bytes = raw.wrenGetSlotBytes(vm, slot, &len);
-        // Wren owns this memory; it remains borrowed for this callback only.
-        return bytes[0..@intCast(len)];
+    if (T == []const u8) return readString(vm, slot);
+    if (T == String) {
+        _ = try readString(vm, slot);
+        return .{ .value = .{ .vm = vm, .slot = slot } };
     }
-
+    if (T == List) return (try (Value{ .vm = vm, .slot = slot }).asList());
+    if (T == Map) return (try (Value{ .vm = vm, .slot = slot }).asMap());
+    if (T == Object) return (try (Value{ .vm = vm, .slot = slot }).asObject());
+    if (T == Num) {
+        try expectType(vm, slot, raw.WREN_TYPE_NUM, "Num");
+        return .{ .value = .{ .vm = vm, .slot = slot } };
+    }
+    if (T == Bool) {
+        try expectType(vm, slot, raw.WREN_TYPE_BOOL, "Bool");
+        return .{ .value = .{ .vm = vm, .slot = slot } };
+    }
+    if (T == Null) {
+        try expectType(vm, slot, raw.WREN_TYPE_NULL, "Null");
+        return .{ .value = .{ .vm = vm, .slot = slot } };
+    }
     switch (@typeInfo(T)) {
         .optional => |info| {
             if (raw.wrenGetSlotType(vm, slot) == raw.WREN_TYPE_NULL) return null;
             return try read(info.child, vm, slot);
         },
         .pointer => return getForeign(T, vm, slot),
-        else => if (slotKind(T)) |kind| {
-            switch (kind) {
-                .list => try expectType(vm, slot, raw.WREN_TYPE_LIST, "List"),
-                .map => try expectType(vm, slot, raw.WREN_TYPE_MAP, "Map"),
-            }
-            return .{ .vm = vm, .slot = slot };
+        .@"struct" => if (comptime isForeignWrapper(T)) {
+            const object = try (Value{ .vm = vm, .slot = slot }).asObject();
+            _ = try getForeign(*T.wren_foreign_type, vm, slot);
+            return .{ .value = object };
         },
+        else => unreachable,
     }
-    unreachable;
 }
 
-/// Encodes a supported Zig value into a Wren slot.
+fn writeAny(vm: ?*raw.WrenVM, slot: c_int, value: anytype) Error!void {
+    const T = @TypeOf(value);
+    if (T == comptime_int) return write(f64, vm, slot, @floatFromInt(value));
+    if (T == comptime_float) return write(f64, vm, slot, value);
+    if (T == []const u8) return write(T, vm, slot, value);
+    if (T == @TypeOf(null)) {
+        raw.wrenSetSlotNull(vm, slot);
+        return;
+    }
+    if (@typeInfo(T) == .pointer) {
+        const info = @typeInfo(T).pointer;
+        if (info.size == .one and @typeInfo(info.child) == .array and @typeInfo(info.child).array.child == u8)
+            return write([]const u8, vm, slot, value);
+    }
+    if (T == f64 or T == bool or T == Value or T == String or T == List or T == Map or T == Object or T == Num or T == Bool or T == Null) return write(T, vm, slot, value);
+    if (@typeInfo(T) == .optional) {
+        if (value) |item| return writeAny(vm, slot, item);
+        raw.wrenSetSlotNull(vm, slot);
+        return;
+    }
+    if (comptime isForeignWrapper(T)) return write(T, vm, slot, value);
+    @compileError("unsupported Wren value: " ++ @typeName(T));
+}
+
 pub fn write(comptime T: type, vm: ?*raw.WrenVM, slot: c_int, value: T) Error!void {
-    if (T == []u8) {
-        @compileError("returning []u8 has ambiguous ownership; return wren.OwnedString instead");
+    if (T == Value) {
+        if (value.vm != vm) {
+            abortMessage(vm, "Cannot return a value from another Wren VM");
+            return error.BindingAborted;
+        }
+        const handle = raw.wrenGetSlotHandle(vm, value.slot) orelse {
+            abortMessage(vm, "Failed to retain Wren value");
+            return error.BindingAborted;
+        };
+        raw.wrenSetSlotHandle(vm, slot, handle);
+        raw.wrenReleaseHandle(vm, handle);
+        return;
+    }
+    if (T == Handle) {
+        if (value.vm != vm) {
+            abortMessage(vm, "Cannot return a handle from another Wren VM");
+            return error.BindingAborted;
+        }
+        raw.wrenSetSlotHandle(vm, slot, value.handle);
+        var owned = value;
+        owned.release();
+        return;
     }
     if (T == void) {
         raw.wrenSetSlotNull(vm, slot);
@@ -299,12 +477,7 @@ pub fn write(comptime T: type, vm: ?*raw.WrenVM, slot: c_int, value: T) Error!vo
         raw.wrenSetSlotBytes(vm, slot, value.ptr, value.len);
         return;
     }
-    if (T == OwnedString) {
-        var owned = value;
-        defer owned.deinit();
-        raw.wrenSetSlotBytes(vm, slot, owned.bytes.ptr, owned.bytes.len);
-        return;
-    }
+    if (T == String or T == List or T == Map or T == Object or T == Num or T == Bool or T == Null) return write(Value, vm, slot, toValue(value));
 
     switch (@typeInfo(T)) {
         .optional => |info| {
@@ -312,16 +485,7 @@ pub fn write(comptime T: type, vm: ?*raw.WrenVM, slot: c_int, value: T) Error!vo
             raw.wrenSetSlotNull(vm, slot);
             return;
         },
-        else => if (slotKind(T) != null) {
-            if (value.vm != vm) {
-                abortMessage(vm, "Cannot return a view from another Wren VM");
-                return error.BindingAborted;
-            }
-            const handle = raw.wrenGetSlotHandle(vm, value.slot);
-            raw.wrenSetSlotHandle(vm, slot, handle);
-            raw.wrenReleaseHandle(vm, handle);
-            return;
-        },
+        else => if (comptime isForeignWrapper(T)) return write(Value, vm, slot, toValue(value)),
     }
     unreachable;
 }
