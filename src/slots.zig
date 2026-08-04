@@ -88,12 +88,17 @@ pub fn Foreign(comptime T: type) type {
             return self.value;
         }
 
-        pub fn get(self: @This()) Error!*T {
-            return getForeign(*T, self.value.value.vm, self.value.value.slot);
+        /// Returns the validated Zig storage behind this foreign object.
+        ///
+        /// Foreign arguments are checked while decoding the callback, so a
+        /// typed foreign value cannot become invalid between decoding and use.
+        pub fn get(self: @This()) *T {
+            return getForeign(*T, self.value.value.vm, self.value.value.slot) catch unreachable;
         }
 
-        pub fn getConst(self: @This()) Error!*const T {
-            return getForeign(*const T, self.value.value.vm, self.value.value.slot);
+        /// Returns the validated immutable Zig storage behind this foreign object.
+        pub fn getConst(self: @This()) *const T {
+            return getForeign(*const T, self.value.value.vm, self.value.value.slot) catch unreachable;
         }
     };
 }

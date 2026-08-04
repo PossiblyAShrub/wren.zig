@@ -83,7 +83,7 @@ fn inspectDynamicValues(list: wren.List) !f64 {
     const text = try (try list.get(1)).asString();
     const point = try (try list.get(2)).asObject();
     const foreign = try wren.Foreign(Point).fromObject(point);
-    return number + @as(f64, @floatFromInt((try text.bytes()).len)) + (try foreign.getConst()).x;
+    return number + @as(f64, @floatFromInt((try text.bytes()).len)) + foreign.getConst().x;
 }
 
 fn makeMixedList(ctx: *wren.Context, point: wren.Foreign(Point)) !wren.List {
@@ -102,19 +102,19 @@ fn inspectDynamicMap(map: wren.Map) !f64 {
 }
 
 fn pointX(point: wren.Foreign(Point)) !f64 {
-    return (try point.getConst()).x;
+    return point.getConst().x;
 }
 
 fn movePoint(point: wren.Foreign(Point), dx: f64) !void {
-    (try point.get()).x += dx;
+    point.get().x += dx;
 }
 
 fn distanceBetween(first: wren.Foreign(Point), second: wren.Foreign(Point)) !f64 {
-    return @abs((try first.getConst()).x - (try second.getConst()).x);
+    return @abs(first.getConst().x - second.getConst().x);
 }
 
 fn clonePoint(point: wren.Foreign(Point)) !Point {
-    return (try point.getConst()).*;
+    return point.getConst().*;
 }
 
 fn makePoint(x: f64) Point {
@@ -130,7 +130,7 @@ fn resourceInit() !Resource {
 }
 
 fn resourceLength(resource: wren.Foreign(Resource)) !f64 {
-    return @floatFromInt((try resource.getConst()).bytes.len);
+    return @floatFromInt(resource.getConst().bytes.len);
 }
 
 fn makeResource() !Resource {
