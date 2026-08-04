@@ -28,6 +28,15 @@ fn demo_add(x: f64) f64 {
     return x + 1;
 }
 
+const Point2 = struct {
+    x: f64,
+    y: f64,
+
+    pub fn init(x: f64, y: f64) Point2 {
+        return .{ .x = x, .y = y };
+    }
+};
+
 const Point = struct {
     x: f64,
     y: f64,
@@ -41,24 +50,15 @@ const Point = struct {
         self.y += dy;
     }
 
+    pub fn translateNew(self: *Point, dx: f64, dy: f64) Point2 {
+        return .{
+            .x = self.x + dx,
+            .y = self.y + dy,
+        };
+    }
+
     pub fn length(self: *const Point) f64 {
         return @sqrt(self.x * self.x + self.y * self.y);
-    }
-
-    pub fn getX(self: *const Point) f64 {
-        return self.x;
-    }
-
-    pub fn setX(self: *Point, value: f64) void {
-        self.x = value;
-    }
-
-    pub fn getY(self: *const Point) f64 {
-        return self.y;
-    }
-
-    pub fn setY(self: *Point, value: f64) void {
-        self.y = value;
     }
 };
 
@@ -83,6 +83,7 @@ const DemoModule = wren.module(.{
             .constructor = wren.Constructor("new", Point.init),
             .methods = .{
                 wren.Method("translate", Point.translate),
+                wren.Method("translateNew", Point.translateNew),
                 wren.Getter("length", Point.length),
                 wren.Getter("x", Point.getX),
                 wren.Setter("x", Point.setX),
