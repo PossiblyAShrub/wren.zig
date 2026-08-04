@@ -464,7 +464,7 @@ fn generateSource(comptime config: anytype) [:0]const u8 {
         source = source ++ (if (class.is_foreign) "foreign class " else "class ") ++ class.name ++ " {\n";
         if (class.is_foreign) {
             source = source ++ "  construct " ++ class.constructor.wren_name ++
-                arguments(functionInfo(class.constructor.function).params.len, .declaration) ++ " {}\n";
+                arguments(constructorArity(class.constructor.function), .declaration) ++ " {}\n";
         }
         inline for (class.methods) |bound_method| {
             source = source ++ "  foreign " ++ methodDeclaration(class, bound_method) ++ "\n";
@@ -477,6 +477,12 @@ fn generateSource(comptime config: anytype) [:0]const u8 {
     // wrenInterpret consumes a C string, while the public slice should exclude
     // that terminator. Appending then sentinel-slicing provides both properties.
     return (source ++ "\x00")[0..source.len :0];
+}
+
+fn constructorArity(comptime func: anytype) usize {
+    const info = functionInfo(func);
+    const context_at = comptime contextIndex(null, func);
+    return info.params.len - if (context_at != null) 1 else 0;
 }
 
 fn validateApi(comptime config: anytype) void {

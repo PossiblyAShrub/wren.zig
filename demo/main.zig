@@ -46,6 +46,38 @@ const Point = struct {
     }
 };
 
+/// A Wren-visible owner for a Zig ArrayList of points.
+const PointList = struct {
+    points: std.ArrayList(Point),
+    allocator: std.mem.Allocator,
+
+    fn init(ctx: *wren.Context) PointList {
+        return .{
+            .points = .empty,
+            .allocator = ctx.allocator(),
+        };
+    }
+
+    fn append(self: *PointList, ctx: *wren.Context, point: wren.Foreign(Point)) !void {
+        try self.points.append(ctx.allocator(), point.get().*);
+    }
+
+    fn count(self: *const PointList) f64 {
+        return @floatFromInt(self.points.items.len);
+    }
+
+    fn at(self: *const PointList, index: f64) !Point {
+        if (index < 0 or @trunc(index) != index) return error.InvalidIndex;
+        const i: usize = @intFromFloat(index);
+        if (i >= self.points.items.len) return error.InvalidIndex;
+        return self.points.items[i];
+    }
+
+    fn deinit(self: *PointList) void {
+        self.points.deinit(self.allocator);
+    }
+};
+
 fn say_hi(ctx: *wren.Context, name: []const u8) !wren.String {
     var buffer: [128]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, "Hi {s}!", .{name});
@@ -73,6 +105,17 @@ const DemoModule = wren.module(.{
             },
             .finalizer = null,
         }),
+
+        wren.ForeignClass(PointList, .{
+            .name = "PointList",
+            .constructor = wren.Constructor("new", PointList.init),
+            .methods = .{
+                wren.Method("append", PointList.append),
+                wren.Getter("count", PointList.count),
+                wren.Method("at", PointList.at),
+            },
+            .finalizer = PointList.deinit,
+        }),
     },
 });
 
@@ -98,7 +141,7 @@ pub fn main() !void {
     defer vm.deinit(gpa);
 
     try vm.interpret("main.wren",
-        \\import "demo.wren" for Test, Point
+        \\import "demo.wren" for Test, Point, PointList
         \\import "other.wren" for Greeter
         \\
         \\System.print(Test.add1(41)) // 42
@@ -114,6 +157,13 @@ pub fn main() !void {
         \\
         \\p.translate(1, 1)
         \\System.print("Updated! %(p.x) %(p.y)") // 1, 3
+        \\
+        \\var points = PointList.new()
+        \\points.append(Point.new(1, 2))
+        \\points.append(Point.new(3, 4))
+        \\System.print("PointList: %(points.count) points")
+        \\System.print(points.at(0).length)
+        \\System.print(points.at(1).x)
         \\
         \\System.print(Greeter.hello("Alice"))
     );
