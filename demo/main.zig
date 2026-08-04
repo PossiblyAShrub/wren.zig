@@ -58,6 +58,10 @@ const PointList = struct {
         };
     }
 
+    fn initHost(allocator: std.mem.Allocator) PointList {
+        return .{ .points = .empty, .allocator = allocator };
+    }
+
     fn append(self: *PointList, ctx: *wren.Context, point: wren.Foreign(Point)) !void {
         try self.points.append(ctx.allocator(), point.get().*);
     }
@@ -167,4 +171,28 @@ pub fn main() !void {
         \\
         \\System.print(Greeter.hello("Alice"))
     );
+
+    // This list is created by Zig in the same scope as the VM, rooted as a
+    // Wren handle, and passed into Wren through a normal method call.
+    var external_value = PointList.initHost(gpa);
+    try external_value.points.append(gpa, .{ .x = 2, .y = 0 });
+    var external_points = try vm.foreign(DemoModule, PointList, external_value);
+    defer external_points.release();
+
+    try vm.interpret("runner.wren",
+        \\import "demo.wren" for Point
+        \\class Runner {
+        \\  static inspect(points) {
+        \\    points.append(Point.new(10, 0))
+        \\    System.print("External PointList count: %(points.count)")
+        \\    System.print("First point x: %(points.at(0).x)")
+        \\    System.print("Added point length: %(points.at(1).length)")
+        \\  }
+        \\}
+    );
+
+    var runner = try vm.variable("runner.wren", "Runner");
+    defer runner.release();
+    var result = try vm.call(runner, "inspect(_)", &.{external_points});
+    result.release();
 }

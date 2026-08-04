@@ -189,5 +189,43 @@ pub fn Vm(comptime T: type) type {
         pub fn collectGarbage(self: *Self) void {
             raw.wrenCollectGarbage(self.data.raw_vm);
         }
+
+        /// Creates a rooted foreign value outside a Wren callback.
+        pub fn foreign(self: *Self, comptime Module: type, comptime ForeignType: type, value: ForeignType) !bindings.Handle {
+            raw.wrenEnsureSlots(self.data.raw_vm, 1);
+            try Module.setForeign(self.data.raw_vm, 0, ForeignType, value);
+            const handle = raw.wrenGetSlotHandle(self.data.raw_vm, 0) orelse return error.OutOfMemory;
+            return .{ .vm = self.data.raw_vm, .handle = handle };
+        }
+
+        /// Roots a top-level Wren variable for host-side use.
+        pub fn variable(self: *Self, module_name: [:0]const u8, name: [:0]const u8) !bindings.Handle {
+            raw.wrenEnsureSlots(self.data.raw_vm, 1);
+            raw.wrenGetVariable(self.data.raw_vm, module_name.ptr, name.ptr, 0);
+            const handle = raw.wrenGetSlotHandle(self.data.raw_vm, 0) orelse return error.OutOfMemory;
+            return .{ .vm = self.data.raw_vm, .handle = handle };
+        }
+
+        /// Invokes a Wren method with a rooted receiver and rooted arguments.
+        pub fn call(self: *Self, receiver: bindings.Handle, signature: [:0]const u8, args: []const bindings.Handle) !bindings.Handle {
+            if (receiver.vm != self.data.raw_vm) return error.WrongVm;
+            raw.wrenEnsureSlots(self.data.raw_vm, @intCast(args.len + 1));
+            receiver.set(0);
+            for (args, 0..) |arg, index| {
+                if (arg.vm != self.data.raw_vm) return error.WrongVm;
+                arg.set(@intCast(index + 1));
+            }
+
+            const method = raw.wrenMakeCallHandle(self.data.raw_vm, signature.ptr) orelse return error.OutOfMemory;
+            defer raw.wrenReleaseHandle(self.data.raw_vm, method);
+            switch (raw.wrenCall(self.data.raw_vm, method)) {
+                raw.WREN_RESULT_SUCCESS => {},
+                raw.WREN_RESULT_COMPILE_ERROR => return error.CompileError,
+                raw.WREN_RESULT_RUNTIME_ERROR => return error.RuntimeError,
+                else => unreachable,
+            }
+            const result = raw.wrenGetSlotHandle(self.data.raw_vm, 0) orelse return error.OutOfMemory;
+            return .{ .vm = self.data.raw_vm, .handle = result };
+        }
     };
 }

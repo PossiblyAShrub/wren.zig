@@ -119,6 +119,18 @@ pub fn module(comptime config: anytype) type {
         /// Generated, sentinel-terminated Wren declarations for this module.
         pub const source: [:0]const u8 = generateSource(config);
 
+        /// Creates a foreign value in a VM slot for host-side injection.
+        pub fn setForeign(vm: ?*raw.WrenVM, slot: c_int, comptime T: type, value: T) !void {
+            if (comptime !isRegisteredForeign(config, T))
+                @compileError("foreign type is not registered in this module: " ++ @typeName(T));
+
+            const class_slot = hostScratchSlots(vm, 1);
+            raw.wrenGetVariable(vm, config.module.ptr, foreignClassName(config, T).ptr, class_slot);
+            const storage = raw.wrenSetSlotNewForeign(vm, slot, class_slot, slots.foreignAllocationSize(T)) orelse
+                return error.OutOfMemory;
+            slots.initForeign(T, storage, value);
+        }
+
         /// Resolves a generated foreign method for Wren's C callback ABI.
         pub fn bindForeignMethod(
             vm: ?*raw.WrenVM,
@@ -321,6 +333,12 @@ fn writeResult(comptime config: anytype, comptime Return: type, value: Return, v
 }
 
 fn scratchSlots(vm: ?*raw.WrenVM, count: c_int) c_int {
+    const first = raw.wrenGetSlotCount(vm);
+    raw.wrenEnsureSlots(vm, first + count);
+    return first;
+}
+
+fn hostScratchSlots(vm: ?*raw.WrenVM, count: c_int) c_int {
     const first = raw.wrenGetSlotCount(vm);
     raw.wrenEnsureSlots(vm, first + count);
     return first;
