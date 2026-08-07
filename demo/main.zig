@@ -104,8 +104,8 @@ const DemoModule = wren.module(.{
             .methods = .{
                 wren.Method("translate", Point.translate),
                 wren.Getter("length", Point.length),
-                wren.Property("x", "x", .read_write),
-                wren.Property("y", "y", .read_write),
+                wren.Field("x", .read_write),
+                wren.Field("y", .read_write),
             },
             .finalizer = null,
         }),
@@ -142,7 +142,7 @@ pub fn main() !void {
         .errorFn = wrenErrorFn,
         .modules = .{ DemoModule, OtherModule },
     });
-    defer vm.deinit(gpa);
+    defer vm.deinitOwned();
 
     try vm.interpret("main.wren",
         \\import "demo.wren" for Test, Point, PointList

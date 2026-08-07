@@ -16,6 +16,11 @@ pub const Value = struct {
         return read(bool, self.vm, self.slot);
     }
 
+    /// Converts this borrowed slot to a supported Zig/Wren value type.
+    pub fn as(self: Value, comptime T: type) Error!T {
+        return read(T, self.vm, self.slot);
+    }
+
     pub fn asNum(self: Value) Error!f64 {
         return read(f64, self.vm, self.slot);
     }
@@ -108,6 +113,20 @@ pub const Handle = struct {
         raw.wrenSetSlotHandle(self.vm, slot, self.handle);
     }
 
+    /// Returns the low-level Wren type of the rooted value.
+    pub fn typeOf(self: Handle) raw.WrenType {
+        raw.wrenEnsureSlots(self.vm, 1);
+        self.set(0);
+        return raw.wrenGetSlotType(self.vm, 0);
+    }
+
+    /// Reads a rooted value as a supported Zig/Wren type.
+    pub fn as(self: Handle, comptime T: type) Error!T {
+        raw.wrenEnsureSlots(self.vm, 1);
+        self.set(0);
+        return read(T, self.vm, 0);
+    }
+
     pub fn release(self: *Handle) void {
         raw.wrenReleaseHandle(self.vm, self.handle);
         self.* = undefined;
@@ -122,6 +141,12 @@ pub const Context = struct {
 
     pub fn allocator(self: Self) std.mem.Allocator {
         return runtime.runtimeData(self.vm).allocator;
+    }
+
+    /// Returns the application state supplied to `Vm.init`, cast to `T`.
+    pub fn userData(self: Self, comptime T: type) ?*T {
+        const data = runtime.runtimeData(self.vm).user_data orelse return null;
+        return @ptrCast(@alignCast(data));
     }
 
     pub fn value(self: Self, slot: c_int) Value {
@@ -344,6 +369,10 @@ fn slotKind(comptime T: type) ?enum { list, map } {
 pub fn validateReadable(comptime T: type) void {
     if (T == f64 or T == bool or T == []const u8 or T == Value or T == String or T == List or T == Map or T == Object or T == Num or T == Bool or T == Null) return;
     switch (@typeInfo(T)) {
+        .int => return,
+        else => {},
+    }
+    switch (@typeInfo(T)) {
         .optional => |info| validateReadable(info.child),
         .pointer => |info| {
             if (info.size != .one) @compileError("foreign values must use wren.Foreign(T)");
@@ -355,6 +384,10 @@ pub fn validateReadable(comptime T: type) void {
 
 pub fn validateWritable(comptime T: type) void {
     if (T == void or T == f64 or T == bool or T == []const u8 or T == Value or T == Handle or T == String or T == List or T == Map or T == Object or T == Num or T == Bool or T == Null) return;
+    switch (@typeInfo(T)) {
+        .int => return,
+        else => {},
+    }
     switch (@typeInfo(T)) {
         .optional => |info| validateWritable(info.child),
         .@"struct" => if (!isForeignWrapper(T)) @compileError("unsupported Wren return type: " ++ @typeName(T)),
@@ -374,6 +407,17 @@ pub fn read(comptime T: type, vm: ?*raw.WrenVM, slot: c_int) Error!T {
     if (T == f64) {
         try expectType(vm, slot, raw.WREN_TYPE_NUM, "Num");
         return raw.wrenGetSlotDouble(vm, slot);
+    }
+    if (@typeInfo(T) == .int) {
+        const number = try read(f64, vm, slot);
+        const info = @typeInfo(T).int;
+        const min_value = if (info.signedness == .signed) @as(f64, @floatFromInt(std.math.minInt(T))) else 0;
+        const max_value = @as(f64, @floatFromInt(std.math.maxInt(T)));
+        if (!std.math.isFinite(number) or @trunc(number) != number or number < min_value or number > max_value) {
+            abortExpected(vm, slot, @typeName(T));
+            return error.BindingAborted;
+        }
+        return @intFromFloat(number);
     }
     if (T == bool) {
         try expectType(vm, slot, raw.WREN_TYPE_BOOL, "Bool");
@@ -418,6 +462,7 @@ fn writeAny(vm: ?*raw.WrenVM, slot: c_int, value: anytype) Error!void {
     const T = @TypeOf(value);
     if (T == comptime_int) return write(f64, vm, slot, @floatFromInt(value));
     if (T == comptime_float) return write(f64, vm, slot, value);
+    if (@typeInfo(T) == .int) return write(T, vm, slot, value);
     if (T == []const u8) return write(T, vm, slot, value);
     if (T == @TypeOf(null)) {
         raw.wrenSetSlotNull(vm, slot);
@@ -468,6 +513,10 @@ pub fn write(comptime T: type, vm: ?*raw.WrenVM, slot: c_int, value: T) Error!vo
     }
     if (T == f64) {
         raw.wrenSetSlotDouble(vm, slot, value);
+        return;
+    }
+    if (@typeInfo(T) == .int) {
+        raw.wrenSetSlotDouble(vm, slot, @floatFromInt(value));
         return;
     }
     if (T == bool) {

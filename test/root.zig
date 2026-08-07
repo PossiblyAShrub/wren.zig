@@ -234,6 +234,7 @@ fn captureError(_: ?*State, kind: wren.ErrorType, _: ?[]const u8, _: i32, messag
     }
 }
 
+
 fn bindingVm() !wren.Vm(State) {
     return wren.Vm(State).init(std.testing.allocator, &binding_state, .{
         .errorFn = captureError,
@@ -248,6 +249,19 @@ test "No side effects" {
 
     try vm.interpret("main.wren", "var x = 42");
 }
+
+test "host values and typed call results" {
+    var vm = try bindingVm();
+    defer vm.deinit(std.testing.allocator);
+
+    var bridge = try vm.variable("bindings.wren", "Bridge");
+    defer bridge.release();
+    var input = try vm.string("from host");
+    defer input.release();
+    var output = try vm.callValue(wren.String, bridge, "echo(_)", &.{input});
+    try std.testing.expectEqualStrings("from host", try output.bytes());
+}
+
 
 test "Compile error" {
     const gpa = std.testing.allocator;

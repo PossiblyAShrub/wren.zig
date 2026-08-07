@@ -6,6 +6,7 @@ const std = @import("std");
 /// depending on the concrete Vm type.
 pub const RuntimeData = struct {
     allocator: std.mem.Allocator,
+    user_data: ?*anyopaque = null,
 };
 
 pub fn runtimeData(vm: ?*raw.WrenVM) *RuntimeData {

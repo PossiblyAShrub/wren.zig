@@ -21,6 +21,16 @@ pub const MethodKind = enum { static, instance, getter, setter, property };
 
 pub const PropertyMode = enum { read_only, read_write };
 
+/// Declares a field-backed property whose Wren and Zig names are identical.
+pub fn Field(comptime name: []const u8, comptime mode: PropertyMode) struct {
+    kind: MethodKind = .property,
+    wren_name: []const u8 = name,
+    field_name: []const u8 = name,
+    mode: PropertyMode = mode,
+} {
+    return .{};
+}
+
 fn MethodSpec(comptime Func: type) type {
     return struct {
         kind: MethodKind,
@@ -92,16 +102,16 @@ pub fn ForeignClass(comptime T: type, comptime options: anytype) struct {
     foreign_type: type,
     name: []const u8,
     constructor: @TypeOf(options.constructor),
-    methods: @TypeOf(options.methods),
-    finalizer: @TypeOf(options.finalizer),
+    methods: if (@hasField(@TypeOf(options), "methods")) @TypeOf(options.methods) else @TypeOf(.{}),
+    finalizer: if (@hasField(@TypeOf(options), "finalizer")) @TypeOf(options.finalizer) else ?*const fn (*T) void,
 } {
     return .{
         .is_foreign = true,
         .foreign_type = T,
         .name = options.name,
         .constructor = options.constructor,
-        .methods = options.methods,
-        .finalizer = options.finalizer,
+        .methods = if (@hasField(@TypeOf(options), "methods")) options.methods else .{},
+        .finalizer = if (@hasField(@TypeOf(options), "finalizer")) options.finalizer else null,
     };
 }
 
@@ -378,12 +388,12 @@ fn propertyWrap(comptime T: type, comptime field_name: []const u8, comptime sett
     return struct {
         fn callback(vm: ?*raw.WrenVM) callconv(.c) void {
             const receiver = slots.getForeign(*T, vm, 0) catch return;
-            const Field = @TypeOf(@field(receiver.*, field_name));
+            const FieldType = @TypeOf(@field(receiver.*, field_name));
             if (setter) {
-                const value = slots.read(Field, vm, 1) catch return;
+                const value = slots.read(FieldType, vm, 1) catch return;
                 @field(receiver.*, field_name) = value;
             } else {
-                slots.write(Field, vm, 0, @field(receiver.*, field_name)) catch {};
+                slots.write(FieldType, vm, 0, @field(receiver.*, field_name)) catch {};
             }
         }
     }.callback;
@@ -552,9 +562,9 @@ fn validateMethod(comptime config: anytype, comptime class: anytype, comptime bo
         if (!class.is_foreign) @compileError("properties require a foreign class");
         if (!@hasField(class.foreign_type, bound_method.field_name))
             @compileError("unknown property field " ++ bound_method.field_name ++ " on " ++ @typeName(class.foreign_type));
-        const Field = @TypeOf(@field(@as(class.foreign_type, undefined), bound_method.field_name));
-        slots.validateWritable(Field);
-        if (bound_method.mode == .read_write) slots.validateReadable(Field);
+        const FieldType = @TypeOf(@field(@as(class.foreign_type, undefined), bound_method.field_name));
+        slots.validateWritable(FieldType);
+        if (bound_method.mode == .read_write) slots.validateReadable(FieldType);
         return;
     }
     const info = functionInfo(bound_method.function);

@@ -38,6 +38,8 @@ pub const Object = bindings.Object;
 pub const Foreign = bindings.Foreign;
 /// Generates Wren property accessors for a foreign struct field.
 pub const Property = bindings.Property;
+/// Declares a field-backed property using the same Wren and Zig name.
+pub const Field = bindings.Field;
 pub const PropertyMode = bindings.PropertyMode;
 
 /// Describes an error reported by the Wren VM.
@@ -136,6 +138,7 @@ pub fn Vm(comptime T: type) type {
             data.* = .{
                 .runtime = .{
                     .allocator = gpa,
+                    .user_data = if (user_data) |ptr| @ptrCast(ptr) else null,
                 },
                 .config = runtime_config,
                 .user_data = user_data,
@@ -169,15 +172,22 @@ pub fn Vm(comptime T: type) type {
         }
 
         /// Frees the Wren VM and its auxiliary state using the allocator from `init`.
-        pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             raw.wrenFreeVM(self.data.raw_vm);
-            gpa.destroy(self.data);
+            allocator.destroy(self.data);
+            self.* = undefined;
+        }
+
+        /// Frees the VM using the allocator supplied to `init`.
+        pub fn deinitOwned(self: *Self) void {
+            raw.wrenFreeVM(self.data.raw_vm);
+            self.data.runtime.allocator.destroy(self.data);
             self.* = undefined;
         }
 
         /// Compiles and executes sentinel-terminated Wren source as `module_name`.
-        pub fn interpret(self: *Self, module_name: [*c]const u8, source: [*c]const u8) InterpretError!void {
-            return switch (raw.wrenInterpret(self.data.raw_vm, module_name, source)) {
+        pub fn interpret(self: *Self, module_name: [:0]const u8, source: [:0]const u8) InterpretError!void {
+            return switch (raw.wrenInterpret(self.data.raw_vm, module_name.ptr, source.ptr)) {
                 raw.WREN_RESULT_SUCCESS => {},
                 raw.WREN_RESULT_COMPILE_ERROR => error.CompileError,
                 raw.WREN_RESULT_RUNTIME_ERROR => error.RuntimeError,
@@ -190,6 +200,39 @@ pub fn Vm(comptime T: type) type {
             raw.wrenCollectGarbage(self.data.raw_vm);
         }
 
+        fn fromSlot(self: *Self) !bindings.Handle {
+            const handle = raw.wrenGetSlotHandle(self.data.raw_vm, 0) orelse return error.OutOfMemory;
+            return .{ .vm = self.data.raw_vm, .handle = handle };
+        }
+
+        /// Creates a rooted Wren number.
+        pub fn number(self: *Self, value: f64) !bindings.Handle {
+            raw.wrenEnsureSlots(self.data.raw_vm, 1);
+            raw.wrenSetSlotDouble(self.data.raw_vm, 0, value);
+            return self.fromSlot();
+        }
+
+        /// Creates a rooted Wren boolean.
+        pub fn boolean(self: *Self, value: bool) !bindings.Handle {
+            raw.wrenEnsureSlots(self.data.raw_vm, 1);
+            raw.wrenSetSlotBool(self.data.raw_vm, 0, value);
+            return self.fromSlot();
+        }
+
+        /// Creates a rooted Wren string from arbitrary bytes.
+        pub fn string(self: *Self, bytes: []const u8) !bindings.Handle {
+            raw.wrenEnsureSlots(self.data.raw_vm, 1);
+            raw.wrenSetSlotBytes(self.data.raw_vm, 0, bytes.ptr, bytes.len);
+            return self.fromSlot();
+        }
+
+        /// Creates a rooted Wren null value.
+        pub fn nullValue(self: *Self) !bindings.Handle {
+            raw.wrenEnsureSlots(self.data.raw_vm, 1);
+            raw.wrenSetSlotNull(self.data.raw_vm, 0);
+            return self.fromSlot();
+        }
+
         /// Creates a rooted foreign value outside a Wren callback.
         pub fn foreign(self: *Self, comptime Module: type, comptime ForeignType: type, value: ForeignType) !bindings.Handle {
             raw.wrenEnsureSlots(self.data.raw_vm, 1);
@@ -200,10 +243,21 @@ pub fn Vm(comptime T: type) type {
 
         /// Roots a top-level Wren variable for host-side use.
         pub fn variable(self: *Self, module_name: [:0]const u8, name: [:0]const u8) !bindings.Handle {
+            if (!raw.wrenHasVariable(self.data.raw_vm, module_name.ptr, name.ptr)) return error.VariableNotFound;
             raw.wrenEnsureSlots(self.data.raw_vm, 1);
             raw.wrenGetVariable(self.data.raw_vm, module_name.ptr, name.ptr, 0);
             const handle = raw.wrenGetSlotHandle(self.data.raw_vm, 0) orelse return error.OutOfMemory;
             return .{ .vm = self.data.raw_vm, .handle = handle };
+        }
+
+        /// Returns whether a top-level variable exists in a module.
+        pub fn hasVariable(self: *Self, module_name: [:0]const u8, name: [:0]const u8) bool {
+            return raw.wrenHasVariable(self.data.raw_vm, module_name.ptr, name.ptr);
+        }
+
+        /// Returns whether a module has been loaded by Wren.
+        pub fn hasModule(self: *Self, module_name: [:0]const u8) bool {
+            return raw.wrenHasModule(self.data.raw_vm, module_name.ptr);
         }
 
         /// Invokes a Wren method with a rooted receiver and rooted arguments.
@@ -224,8 +278,14 @@ pub fn Vm(comptime T: type) type {
                 raw.WREN_RESULT_RUNTIME_ERROR => return error.RuntimeError,
                 else => unreachable,
             }
-            const result = raw.wrenGetSlotHandle(self.data.raw_vm, 0) orelse return error.OutOfMemory;
-            return .{ .vm = self.data.raw_vm, .handle = result };
+            return self.fromSlot();
+        }
+
+        /// Calls a method and decodes its rooted result as `Result`.
+        pub fn callValue(self: *Self, comptime Result: type, receiver: bindings.Handle, signature: [:0]const u8, args: []const bindings.Handle) !Result {
+            var result = try self.call(receiver, signature, args);
+            defer result.release();
+            return result.as(Result);
         }
     };
 }

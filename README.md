@@ -1,97 +1,82 @@
 # wren.zig
 
-Zig bindings for [wren](https://wren.io).
+Zig bindings for [Wren](https://wren.io), including declarative foreign-class
+bindings and a small host-side VM API.
 
-## Usage
-
-Add to your project with:
+## Installation
 
 ```sh
 zig fetch --save=wren git+https://github.com/PossiblyAShrub/wren.zig.git
 ```
 
-wren.zig exposes a zig-ified wren API. Bindings can be automatically generated
-from functions.
+In `build.zig`, import the fetched package into the root module:
+
+```zig
+const wren_dep = b.dependency("wren", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("wren", wren_dep.module("wren"));
+```
+
+## A minimal VM
 
 ```zig
 const std = @import("std");
 const wren = @import("wren");
-const gpa = std.heap.smp_allocator;
 
-fn writeFn(_: *void, text: []const u8) void {
+fn writeFn(_: ?*void, text: []const u8) void {
     std.debug.print("{s}", .{text});
 }
 
-fn say_hi(ctx: *wren.Context, name: []const u8) !wren.String {
+pub fn main() !void {
+    var vm = try wren.Vm(void).init(std.heap.smp_allocator, null, .{
+        .writeFn = writeFn,
+    });
+    defer vm.deinitOwned();
+    try vm.interpret("main.wren", "System.print(\"hello\")");
+}
+```
+
+`Vm.init` stores the allocator for `deinitOwned`; `deinit(allocator)` remains
+available when the caller wants to provide it explicitly. `writeFn` and
+`errorFn` receive optional user data. Wren heap allocation still uses Wren's
+default allocator.
+
+## Generated bindings
+
+```zig
+fn sayHi(ctx: *wren.Context, name: []const u8) !wren.String {
     var buffer: [128]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, "Hi {s}!", .{name});
     return ctx.string(text);
 }
 
-const DemoModule = wren.module(.{
+const Demo = wren.module(.{
     .module = "demo.wren",
     .classes = .{
         wren.Class(.{
             .name = "Greeter",
-            .methods = .{
-                wren.Static("hello", say_hi),
-            },
+            .methods = .{ wren.Static("hello", sayHi) },
         }),
     },
 });
-
-pub fn main() !void {
-    var vm: wren.Vm(void) = try .init(gpa, null, .{
-        .writeFn = writeFn,
-        .modules = .{ DemoModule },
-    });
-    defer vm.deinit(gpa);
-
-    try vm.interpret("main.wren",
-        \\import "demo.wren" for Greeter
-        \\System.print(Greeter.hello("Alice"))
-    );
-}
 ```
 
-Foreign classes feel like zig classes.
+Foreign classes store a Zig value in Wren-managed foreign storage:
 
 ```zig
 const Point = struct {
     x: f64,
     y: f64,
 
-    pub fn init(x: f64, y: f64) Point {
-        return .{ .x = x, .y = y };
+    fn init(x: f64, y: f64) Point { return .{ .x = x, .y = y }; }
+    fn translate(self: *Point, dx: f64, dy: f64) void {
+        self.x += dx; self.y += dy;
     }
-
-    pub fn translate(self: *Point, dx: f64, dy: f64) void {
-        self.x += dx;
-        self.y += dy;
-    }
-
-    pub fn length(self: *const Point) f64 {
+    fn length(self: *const Point) f64 {
         return @sqrt(self.x * self.x + self.y * self.y);
-    }
-
-    pub fn getX(self: *const Point) f64 {
-        return self.x;
-    }
-
-    pub fn setX(self: *Point, value: f64) void {
-        self.x = value;
-    }
-
-    pub fn getY(self: *const Point) f64 {
-        return self.y;
-    }
-
-    pub fn setY(self: *Point, value: f64) void {
-        self.y = value;
     }
 };
 
-const MathModule = wren.module(.{
+const Math = wren.module(.{
     .module = "math.wren",
     .classes = .{
         wren.ForeignClass(Point, .{
@@ -100,8 +85,8 @@ const MathModule = wren.module(.{
             .methods = .{
                 wren.Method("translate", Point.translate),
                 wren.Getter("length", Point.length),
-                wren.Property("x", "x", .read_write),
-                wren.Property("y", "y", .read_write),
+                wren.Field("x", .read_write),
+                wren.Field("y", .read_write),
             },
             .finalizer = null,
         }),
@@ -109,33 +94,51 @@ const MathModule = wren.module(.{
 });
 ```
 
-Functions that need VM-owned values can opt into a context. Values created by
-the context are owned by Wren and are valid for the duration of the callback.
-Registered foreign Zig values are automatically materialized into Wren foreign
-objects when returned.
+`ForeignClass` defaults `.methods` to an empty tuple and `.finalizer` to
+`null`. A finalizer must be `fn (*T) void`; it must not call the VM.
+
+Pass generated modules in `.modules`; they are interpreted before `init`
+returns. General runtime module loading is not yet exposed; applications should
+preload source with `interpret` or use generated modules.
+
+## Values and lifetimes
+
+Foreign callback arguments are borrowed and valid only during that callback.
+`Value`, `String`, `List`, `Map`, `Object`, and `Foreign(T)` are borrowed views.
+Use `ctx.retain(value)` to create an owned `Handle`; release it exactly once.
+Returning a `Handle` from a bound function transfers ownership to Wren and
+releases the handle automatically.
+
+`List` and `Map` operations use dynamic `Value` results:
 
 ```zig
-fn makePoint(_: *wren.Context, x: f64) Point {
-    return .{ .x = x, .y = 0 };
-}
-
-fn makeList(ctx: *wren.Context) wren.List {
-    return ctx.list();
-}
+const n = try (try list.get(0)).as(f64);
+try map.put("answer", 42);
 ```
 
-Use `ctx.retain(value)` when a Wren value must be kept beyond the callback;
-release the returned handle when it is no longer needed. Ordinary functions
-without a context parameter continue to bind directly from their Zig
-signature.
+Rooted host values can be created with `vm.string`, `vm.number`,
+`vm.boolean`, `vm.nullValue`, or `vm.foreign`. `vm.callValue(T, receiver,
+signature, args)` calls Wren and decodes the rooted result as `T`; `Handle.as(T)`
+does the same for an existing handle.
+
+`Context.userData(T)` accesses the user-data pointer supplied to `Vm.init`.
+`Context.allocator()` returns the allocator stored by the wrapper for use by
+foreign resources.
+
+Supported primitive codecs are Wren numbers (`f64`), booleans, strings
+(`[]const u8`), null through optionals, and the borrowed/rooted wrapper types.
+Foreign pointers (`*T`/`*const T`) and `Foreign(T)` are both accepted for
+foreign arguments; prefer `Foreign(T)` when a value may be passed through
+dynamic collections.
 
 ## Testing
 
-Tests can be run with `zig build test`.
-
-A demo can be run with `zig build demo`.
+```sh
+zig build test
+zig build demo
+```
 
 ## License
 
-The bindings have been released under the [MIT license](./LICENSE). Wren itself
-has licensing details in [wren/LICENSE](./wren/LICENSE).
+The bindings are MIT licensed. Wren is distributed under its own license in
+the Wren dependency.
