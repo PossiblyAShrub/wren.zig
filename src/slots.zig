@@ -289,6 +289,25 @@ pub const List = struct {
         return .{ .vm = self.value.vm, .slot = scratch };
     }
 
+    /// Iterates without growing the VM's slot stack for every element.
+    /// Consume each returned value before calling next() again.
+    pub fn iterator(self: Self) Iterator {
+        return .{ .list = self, .scratch = scratchSlots(self.value.vm, 1) };
+    }
+
+    pub const Iterator = struct {
+        list: Self,
+        scratch: c_int,
+        index: usize = 0,
+
+        pub fn next(self: *Iterator) ?Value {
+            if (self.index >= self.list.len()) return null;
+            raw.wrenGetListElement(self.list.value.vm, self.list.value.slot, @intCast(self.index), self.scratch);
+            self.index += 1;
+            return .{ .vm = self.list.value.vm, .slot = self.scratch };
+        }
+    };
+
     /// Converts `value` and replaces the element at `index`.
     pub fn set(self: Self, index: usize, item: anytype) Error!void {
         if (index >= self.len()) {

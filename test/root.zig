@@ -73,6 +73,17 @@ fn inspectList(list: wren.List) !f64 {
     return (try (try list.get(0)).asNum()) + (try (try list.get(2)).asNum());
 }
 
+fn sumList(list: wren.List) !f64 {
+    var iterator = list.iterator();
+    var sum: f64 = 0;
+    while (iterator.next()) |value| {
+        try std.testing.expectEqual(iterator.scratch, value.slot);
+        sum += try value.asNum();
+    }
+    try std.testing.expect(iterator.next() == null);
+    return sum;
+}
+
 fn inspectMap(map: wren.Map) !f64 {
     try map.put("answer", 42);
     return try (try map.get("answer")).asNum();
@@ -171,6 +182,7 @@ const Bindings = wren.module(.{
                 wren.Static("greeting", greeting),
                 wren.Static("optionalNumber", optionalNumber),
                 wren.Static("inspectList", inspectList),
+                wren.Static("sumList", sumList),
                 wren.Static("inspectMap", inspectMap),
                 wren.Static("inspectDynamicValues", inspectDynamicValues),
                 wren.Static("makeMixedList", makeMixedList),
@@ -289,6 +301,7 @@ test "generated binding source" {
         \\  foreign static greeting(arg0)
         \\  foreign static optionalNumber(arg0)
         \\  foreign static inspectList(arg0)
+        \\  foreign static sumList(arg0)
         \\  foreign static inspectMap(arg0)
         \\  foreign static inspectDynamicValues(arg0)
         \\  foreign static makeMixedList(arg0)
@@ -335,6 +348,23 @@ test "Vm.init preloads multiple generated modules" {
         \\import "more-bindings.wren" for Meter
         \\if (Bridge.echo("first") != "first") Fiber.abort("bad first module")
         \\if (Meter.new(17).value != 17) Fiber.abort("bad second module")
+    );
+}
+
+test "list iterator reuses a slot across a long list" {
+    var vm = try bindingVm();
+    defer vm.deinit(std.testing.allocator);
+
+    try vm.interpret("long-list.wren",
+        \\import "bindings.wren" for Bridge
+        \\if (Bridge.sumList([]) != 0) Fiber.abort("bad empty list")
+        \\var numbers = []
+        \\var i = 0
+        \\while (i < 10000) {
+        \\  numbers.add(i)
+        \\  i = i + 1
+        \\}
+        \\if (Bridge.sumList(numbers) != 49995000) Fiber.abort("bad list sum")
     );
 }
 
