@@ -116,6 +116,18 @@ const n = try (try list.get(0)).as(f64);
 try map.put("answer", 42);
 ```
 
+`Value.kind()` returns a public `ValueKind` without converting the value or
+aborting the fiber. `Value.typeOf()` remains available for low-level inspection.
+To append many values, use `const writer = list.writer()` and
+`try writer.append(item)`. Each writer reserves one scratch slot and reuses it;
+it is valid only during the active callback and accepts the same values as
+`List.append()`.
+
+Return `ctx.abort(message)` from a callback to abort the fiber with a custom
+diagnostic. Wren copies the bytes, including embedded zero and non-UTF-8 bytes,
+so stack buffers are supported. Returning `BindingAborted` preserves that
+diagnostic for `Fiber.try()`.
+
 Rooted host values can be created with `vm.string`, `vm.number`,
 `vm.boolean`, `vm.nullValue`, or `vm.foreign`. `vm.callValue(T, receiver,
 signature, args)` calls Wren and decodes the rooted result as `T`; `Handle.as(T)`

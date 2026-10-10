@@ -1,6 +1,144 @@
 const std = @import("std");
 const wren = @import("wren");
 
+const Helpers = struct {
+    fn report(_: ?*void, kind: wren.ErrorType, module: ?[]const u8, line: i32, message: []const u8) void {
+        std.debug.print("{s} {s}:{d}: {s}\n", .{ @tagName(kind), module orelse "", line, message });
+    }
+
+    fn kinds(ctx: *wren.Context, value: wren.Value) !wren.String {
+        const original_type = value.typeOf();
+        const kind: wren.ValueKind = value.kind();
+        try std.testing.expectEqual(original_type, value.typeOf());
+        return ctx.string(@tagName(kind));
+    }
+
+    fn many(ctx: *wren.Context) !wren.List {
+        const result = ctx.list();
+        const before = ctx.string("before").value.slot;
+        const writer: wren.List.Writer = result.writer();
+        for (0..10000) |i| try writer.append(i);
+        try writer.append(true);
+        try writer.append(@as([]const u8, "\x00\xff"));
+        try writer.append(null);
+        // Only the writer's slot should have been allocated between these strings.
+        try std.testing.expectEqual(before + 2, ctx.string("after").value.slot);
+        return result;
+    }
+
+    fn copy(ctx: *wren.Context, value: wren.Value) !wren.List {
+        const result = ctx.list();
+        const writer = result.writer();
+        const second_writer = result.writer();
+        try writer.append(value);
+        try second_writer.append(value);
+        try writer.append(ctx.string("owned"));
+        try writer.append(ctx.list());
+        try writer.append(ctx.map());
+        const optional: ?u32 = 42;
+        try writer.append(optional);
+        try writer.append(@as(?u32, null));
+        return result;
+    }
+
+    fn fail(ctx: *wren.Context) error{BindingAborted}!void {
+        var message = [_]u8{ 'o', 'o', 'p', 's', 0, 255 };
+        const err = ctx.abort(&message);
+        @memset(&message, '?');
+        return err;
+    }
+
+    fn fieldError(ctx: *wren.Context, value: wren.Value) !void {
+        if (value.kind() != .number) {
+            var buffer: [128]u8 = undefined;
+            const message = try std.fmt.bufPrint(&buffer, "bytes: field {d}: expected a Number", .{@as(usize, 3)});
+            return ctx.abort(message);
+        }
+    }
+
+    fn wrongVm(ctx: *wren.Context) !wren.List {
+        const result = ctx.list();
+        const writer = result.writer();
+        try writer.append(ctx.userData(wren.Value).?.*);
+        return result;
+    }
+};
+
+const HelpersApi = wren.module(.{
+    .module = "helpers",
+    .classes = .{wren.Class(.{
+        .name = "Helpers",
+        .methods = .{
+            wren.Static("kinds", Helpers.kinds),
+            wren.Static("many", Helpers.many),
+            wren.Static("copy", Helpers.copy),
+            wren.Static("fail", Helpers.fail),
+            wren.Static("fieldError", Helpers.fieldError),
+            wren.Static("wrongVm", Helpers.wrongVm),
+        },
+    })},
+});
+
+test "public value inspection, list writer, and fiber diagnostics" {
+    var vm = try wren.Vm(void).init(std.testing.allocator, null, .{ .modules = .{ HelpersApi, Bindings }, .errorFn = Helpers.report });
+    defer vm.deinitOwned();
+
+    try vm.interpret("helpers-test",
+        \\import "helpers" for Helpers
+        \\import "bindings.wren" for Point
+        \\var input = [true, 1, "", Point.new(5), [], {}, null, Fn.new {}, Point, Point.type]
+        \\var expected = ["boolean", "number", "string", "foreign", "list", "map", "null", "unknown", "unknown", "unknown"]
+        \\for (i in 0...(expected.count)) {
+        \\  if (Helpers.kinds(input[i]) != expected[i]) Fiber.abort("value kind")
+        \\}
+        \\var values = Helpers.many()
+        \\if (values.count != 10003) Fiber.abort("list length")
+        \\for (i in 0...10000) {
+        \\  if (values[i] != i) Fiber.abort("list value")
+        \\}
+        \\if (values[10000] != true) Fiber.abort("Boolean value")
+        \\if (values[10001] != "\x00\xff") Fiber.abort("binary value")
+        \\if (values[10002] != null) Fiber.abort("null value")
+        \\var copied = []
+        \\for (i in 0...(input.count)) {
+        \\  var result = Helpers.copy(input[i])
+        \\  if (result[0] != input[i] || result[1] != input[i]) Fiber.abort("wrapper value")
+        \\  if (result[2] != "owned" || result[3].count != 0 || result[4].count != 0 || result[5] != 42 || result[6] != null) Fiber.abort("writer codecs")
+        \\  copied.add(result)
+        \\}
+        \\var error = Fiber.new { Helpers.fail() }.try()
+        \\if (error != "oops\x00\xff") Fiber.abort("diagnostic")
+        \\var fieldError = Fiber.new { Helpers.fieldError("bad") }.try()
+        \\if (fieldError != "bytes: field 3: expected a Number") Fiber.abort("field diagnostic")
+        \\Helpers.fieldError(42)
+        \\if (Helpers.many()[9999] != 9999) Fiber.abort("recovery")
+    );
+
+    vm.collectGarbage();
+
+    try vm.interpret("helpers-test",
+        \\if (values[10001] != "\x00\xff") Fiber.abort("list ownership")
+        \\if (error != "oops\x00\xff") Fiber.abort("diagnostic ownership")
+        \\if (copied[3][0].x != 5 || copied[3][2] != "owned") Fiber.abort("wrapper ownership")
+    );
+}
+
+test "list writer rejects values from another VM" {
+    var owner = try wren.Vm(void).init(std.testing.allocator, null, .{});
+    defer owner.deinitOwned();
+    var handle = try owner.string("other VM");
+    defer handle.release();
+    var value = try handle.as(wren.Value);
+    var vm = try wren.Vm(wren.Value).init(std.testing.allocator, &value, .{ .modules = .{HelpersApi} });
+    defer vm.deinitOwned();
+    try vm.interpret("wrong-vm",
+        \\import "helpers" for Helpers
+        \\var error = Fiber.new { Helpers.wrongVm() }.try()
+        \\if (error != "Cannot return a value from another Wren VM") Fiber.abort("ownership check")
+        \\if (Helpers.many()[9999] != 9999) Fiber.abort("recovery")
+    );
+}
+
 const Point = struct {
     x: f64,
 
@@ -246,7 +384,6 @@ fn captureError(_: ?*State, kind: wren.ErrorType, _: ?[]const u8, _: i32, messag
     }
 }
 
-
 fn bindingVm() !wren.Vm(State) {
     return wren.Vm(State).init(std.testing.allocator, &binding_state, .{
         .errorFn = captureError,
@@ -273,7 +410,6 @@ test "host values and typed call results" {
     var output = try vm.callValue(wren.String, bridge, "echo(_)", &.{input});
     try std.testing.expectEqualStrings("from host", try output.bytes());
 }
-
 
 test "Compile error" {
     const gpa = std.testing.allocator;

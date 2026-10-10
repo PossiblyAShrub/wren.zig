@@ -2,11 +2,37 @@ const std = @import("std");
 const raw = @import("wren_raw");
 const runtime = @import("context.zig");
 
+/// The public kinds of Wren values. Classes, instances, and functions are unknown.
+pub const ValueKind = enum {
+    boolean,
+    number,
+    string,
+    foreign,
+    list,
+    map,
+    null,
+    unknown,
+};
+
 /// A value stored in a temporary Wren slot. It is valid only while the active
 /// foreign callback is running.
 pub const Value = struct {
     vm: ?*raw.WrenVM,
     slot: c_int,
+
+    /// Inspects this value without conversion or aborting the active fiber.
+    pub fn kind(self: Value) ValueKind {
+        return switch (self.typeOf()) {
+            raw.WREN_TYPE_BOOL => .boolean,
+            raw.WREN_TYPE_NUM => .number,
+            raw.WREN_TYPE_STRING => .string,
+            raw.WREN_TYPE_FOREIGN => .foreign,
+            raw.WREN_TYPE_LIST => .list,
+            raw.WREN_TYPE_MAP => .map,
+            raw.WREN_TYPE_NULL => .null,
+            else => .unknown,
+        };
+    }
 
     pub fn typeOf(self: Value) raw.WrenType {
         return raw.wrenGetSlotType(self.vm, self.slot);
@@ -100,7 +126,6 @@ pub fn Foreign(comptime T: type) type {
         pub fn get(self: @This()) *T {
             return getForeign(*T, self.value.value.vm, self.value.value.slot) catch unreachable;
         }
-
     };
 }
 
@@ -138,6 +163,13 @@ pub const Context = struct {
     pub const wren_context = true;
     const Self = @This();
     vm: ?*raw.WrenVM,
+
+    /// Copies arbitrary diagnostic bytes into Wren and aborts the active fiber.
+    /// Return this error from the callback to preserve the diagnostic.
+    pub fn abort(self: Self, message: []const u8) Error {
+        abortMessage(self.vm, message);
+        return error.BindingAborted;
+    }
 
     pub fn allocator(self: Self) std.mem.Allocator {
         return runtime.runtimeData(self.vm).allocator;
@@ -321,10 +353,25 @@ pub const List = struct {
 
     /// Converts and appends `value` to the list.
     pub fn append(self: Self, item: anytype) Error!void {
-        const scratch = scratchSlots(self.value.vm, 1);
-        try writeAny(self.value.vm, scratch, item);
-        raw.wrenInsertInList(self.value.vm, self.value.slot, -1, scratch);
+        try self.writer().append(item);
     }
+
+    /// Reserves one scratch slot for repeated appends during this callback.
+    /// The writer and its list must not outlive the active foreign callback.
+    pub fn writer(self: Self) Writer {
+        return .{ .list = self, .scratch = scratchSlots(self.value.vm, 1) };
+    }
+
+    pub const Writer = struct {
+        list: List,
+        scratch: c_int,
+
+        /// Converts and appends an item, reusing the writer's reserved slot.
+        pub fn append(self: Writer, item: anytype) Error!void {
+            try writeAny(self.list.value.vm, self.scratch, item);
+            raw.wrenInsertInList(self.list.value.vm, self.list.value.slot, -1, self.scratch);
+        }
+    };
 };
 
 /// Returns a borrowed typed view over a Wren map argument.

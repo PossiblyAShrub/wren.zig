@@ -27,6 +27,8 @@ pub const Map = bindings.Map;
 pub const String = bindings.String;
 /// A callback-scoped value stored in a Wren VM slot.
 pub const Value = bindings.Value;
+/// The kind of a Wren value, independent of the low-level C API.
+pub const ValueKind = bindings.ValueKind;
 /// A rooted Wren value that must be explicitly released.
 pub const Handle = bindings.Handle;
 /// Typed access to the active Wren VM.

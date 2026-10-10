@@ -8,6 +8,7 @@ pub const List = slots.List;
 pub const Map = slots.Map;
 pub const String = slots.String;
 pub const Value = slots.Value;
+pub const ValueKind = slots.ValueKind;
 pub const Handle = slots.Handle;
 pub const Context = slots.Context;
 pub const Bool = slots.Bool;
